@@ -4,8 +4,28 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - /home/ubuntu/openship/host-control-key:/run/openship/host-key:ro
+      # The root docker-compose.yml api service (SaaS/from-source control plane)
+      # deliberately ships with NO docker socket and NO edge volumes — see its
+      # header comment. THIS install runs api from that file but edge/dashboard
+      # from docker/docker-compose.yml (the self-hosted stack), so api still
+      # needs the docker socket (to build/run deployed app containers) and the
+      # same shared routing volumes edge reads from (so registerRoute's vhost
+      # writes are actually visible to edge). Without these, api silently loses
+      # deploy + routing capability on every recreate — discovered 2026-07-29
+      # after ~1.5h of api running with only the host-control-key mount.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - openship_sites:/usr/local/openresty/nginx/conf/sites-enabled
+      - openship_certs:/etc/letsencrypt
+      - openship_acme:/var/www/acme
+      - openship_static:/opt/openship/static
     environment:
       OPENSHIP_HOST_SSH_HOST: host.docker.internal
       OPENSHIP_HOST_SSH_PORT: "22"
       OPENSHIP_HOST_SSH_USER: root
       OPENSHIP_HOST_SSH_KEY: /run/openship/host-key
+
+volumes:
+  openship_sites:
+  openship_certs:
+  openship_acme:
+  openship_static:
