@@ -306,6 +306,7 @@ export const endpoints = {
     scan: "mail/scan",
     adopt: "mail/adopt",
     setup: "mail/setup",
+    port25Recheck: "mail/setup/port25",
     cancelSetup: "mail/setup/cancel",
     acknowledgeDns: "mail/setup/dns-ack",
     acknowledgePtr: "mail/setup/ptr-ack",
@@ -331,6 +332,8 @@ export const endpoints = {
         `mail/admin/${encodeURIComponent(serverId)}/mailboxes`,
       mailbox: (serverId: string, email: string) =>
         `mail/admin/${encodeURIComponent(serverId)}/mailboxes/${encodeURIComponent(email)}`,
+      webmailHandoff: (serverId: string, email: string) =>
+        `mail/admin/${encodeURIComponent(serverId)}/mailboxes/${encodeURIComponent(email)}/webmail-handoff`,
       stats: (serverId: string) =>
         `mail/admin/${encodeURIComponent(serverId)}/stats`,
       dnsScan: (serverId: string) =>

@@ -1,5 +1,6 @@
 {
   "lockfileVersion": 1,
+  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "openship",
@@ -16,7 +17,7 @@
     },
     "apps/api": {
       "name": "@repo/api",
-      "version": "0.3.0",
+      "version": "0.4.5",
       "dependencies": {
         "@better-auth/drizzle-adapter": "^1.5.4",
         "@hono/node-server": "^1.19.15",
@@ -50,7 +51,7 @@
     },
     "apps/cli": {
       "name": "openship",
-      "version": "0.3.0",
+      "version": "0.4.5",
       "bin": {
         "openship": "./dist/index.js",
       },
@@ -114,7 +115,7 @@
     },
     "apps/desktop": {
       "name": "@repo/desktop",
-      "version": "0.3.0",
+      "version": "0.4.5",
       "dependencies": {
         "@repo/core": "workspace:*",
         "@repo/onboarding": "workspace:*",
@@ -137,11 +138,11 @@
     },
     "apps/email": {
       "name": "@repo/email",
-      "version": "0.3.0",
+      "version": "0.4.5",
     },
     "apps/web": {
       "name": "@repo/web",
-      "version": "0.3.0",
+      "version": "0.4.5",
       "dependencies": {
         "@repo/core": "workspace:*",
         "@repo/ui": "workspace:*",
@@ -274,6 +275,7 @@
   },
   "trustedDependencies": [
     "esbuild",
+    "electron",
   ],
   "packages": {
     "@alloc/quick-lru": ["@alloc/quick-lru@5.2.0", "", {}, "sha512-UrcABB+4bUrFABwbluTIBErXwvbsU/V7TZWfmbgJfbkwiBuziS9gxdODUyuiecfdGQ85jglMW6juS3+z5TsKLw=="],

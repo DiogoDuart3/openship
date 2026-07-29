@@ -20,6 +20,7 @@ import { env } from '../env';
 export interface SessionContext {
   sessionId: string;
   email: string;
+  authUser: string;
   name: string | null;
   password: string;
   imapHost: string;
@@ -31,19 +32,22 @@ export interface SessionContext {
 
 export async function createSession(opts: {
   email: string;
+  authUser?: string;
   name: string | null;
   password: string;
   imapHost: string;
   imapPort: number;
   smtpHost: string;
   smtpPort: number;
+  expiresAt?: Date;
 }): Promise<{ id: string; expiresAt: Date }> {
   const id = nanoid(40);
   const now = new Date();
-  const expiresAt = new Date(now.getTime() + env.SESSION_TTL_SECONDS * 1000);
+  const expiresAt = opts.expiresAt ?? new Date(now.getTime() + env.SESSION_TTL_SECONDS * 1000);
   await db.insert(schema.session).values({
     id,
     email: opts.email.toLowerCase(),
+    authUser: opts.authUser ?? opts.email.toLowerCase(),
     name: opts.name,
     encryptedPassword: encryptSecret(opts.password),
     imapHost: opts.imapHost,
@@ -68,6 +72,7 @@ export async function getSession(sessionId: string): Promise<SessionContext | nu
   return {
     sessionId: row.id,
     email: row.email,
+    authUser: row.authUser || row.email,
     name: row.name,
     password: decryptSecret(row.encryptedPassword as Buffer),
     imapHost: row.imapHost,

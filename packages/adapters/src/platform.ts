@@ -105,6 +105,19 @@ export interface PlatformConfig {
    */
   executor?: CommandExecutor;
   /**
+   * This platform targets THE BOX OPENSHIP ITSELF RUNS ON (self-hosted only).
+   *
+   * Set it whenever an `executor` is injected that is still local — notably the
+   * auto-registered "This Server" row, which resolves through the server branch
+   * but hands over `createHostExecutor()`. Without it an injected executor is
+   * indistinguishable from a remote SSH one, and the containerized-edge mode
+   * (OPENSHIP_EDGE_MODE=docker) is skipped for the local box — routing then
+   * targets a bare host OpenResty that isn't the one serving :80/:443.
+   *
+   * Omit for remote servers: they manage their own host's OpenResty.
+   */
+  localHost?: boolean;
+  /**
    * Custom state store for caching setup results.
    * Defaults to FileStateStore. The API layer can provide a DB-backed store.
    */
@@ -270,8 +283,21 @@ async function createSelfHostedPlatform(config: PlatformConfig): Promise<Platfor
   // remote server (those carry an injected pooled executor / ssh config and
   // manage their own host's bare OpenResty). Gated on the local case so remote
   // routing is untouched.
-  const useDockerEdge =
-    !config.executor && !config.ssh && process.env.OPENSHIP_EDGE_MODE === "docker";
+  //
+  // `!config.executor` alone is NOT the local test. A deployment pinned to the
+  // auto-registered "This Server" row resolves through the SERVER branch of
+  // resolveTargetPlatform, which injects createHostExecutor() — an executor that
+  // targets THIS box, not a remote one. That silently flipped useDockerEdge to
+  // false, so the local box's routing was built against the HOST's bare
+  // OpenResty while the `openship-edge` container was the thing actually serving
+  // :80/:443. Every registerRoute then wrote its vhost into the host tree
+  // (nothing reads it), failed its reload (no host master owns the ports), and —
+  // because /proc/1/comm on the host is systemd, not openresty —
+  // buildReloadCommand's `pkill -f openresty` fallback reaped the CONTAINER's
+  // master from the host PID namespace, restarting the edge and 521-ing every
+  // site on the box. Callers that mean "this box" now say so explicitly.
+  const isLocalTarget = !config.ssh && (!config.executor || config.localHost === true);
+  const useDockerEdge = isLocalTarget && process.env.OPENSHIP_EDGE_MODE === "docker";
   const edgeContainer = process.env.OPENSHIP_EDGE_CONTAINER?.trim() || "openship-edge";
 
   // Executor - use injected (managed/pooled) executor, or create a fresh one

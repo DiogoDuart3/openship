@@ -1,0 +1,11 @@
+services:
+  api:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /home/ubuntu/openship/host-control-key:/run/openship/host-key:ro
+    environment:
+      OPENSHIP_HOST_SSH_HOST: host.docker.internal
+      OPENSHIP_HOST_SSH_PORT: "22"
+      OPENSHIP_HOST_SSH_USER: root
+      OPENSHIP_HOST_SSH_KEY: /run/openship/host-key

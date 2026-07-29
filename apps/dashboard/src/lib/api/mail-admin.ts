@@ -267,6 +267,10 @@ export const mailAdminApi = {
       api.get<{ mailbox: AdminMailbox }>(
         endpoints.mail.admin.mailbox(serverId, email),
       ),
+    webmailHandoff: (serverId: string, email: string) =>
+      api.post<{ url: string; expiresAt: string }>(
+        endpoints.mail.admin.webmailHandoff(serverId, email),
+      ),
     create: (serverId: string, payload: CreateMailboxPayload) =>
       api.post<{ mailbox: AdminMailbox }>(
         endpoints.mail.admin.mailboxes(serverId),
@@ -371,7 +375,7 @@ export const mailAdminApi = {
 
 // ─── Component actions / logs ────────────────────────────────────────────────
 
-export type ComponentAction = "restart" | "start" | "stop";
+export type ComponentAction = "restart" | "start" | "stop" | "install";
 
 export interface ComponentActionResult {
   key: string;

@@ -33,6 +33,7 @@ r.delete("/servers/:serverId", { tag: "mail_server:admin" }, mail.forgetMailServ
 r.post("/scan", { tag: "mail_server:write" }, mail.scanMailInstall);
 r.post("/adopt", { tag: "mail_server:write" }, mail.adoptMailServer);
 r.post("/setup", { tag: "mail_server:write" }, mail.startSetup);
+r.post("/setup/port25", { tag: "mail_server:write" }, mail.recheckPort25);
 r.post("/setup/cancel", { tag: "mail_server:write" }, mail.cancelSetup);
 r.post("/setup/dns-ack", { tag: "mail_server:write" }, mail.acknowledgeDns);
 r.post("/setup/ptr-ack", { tag: "mail_server:write" }, mail.acknowledgePtr);
@@ -103,6 +104,11 @@ r.post(
   "/admin/:serverId/mailboxes",
   { tag: "mail_server:write" },
   admin.createMailboxHandler,
+);
+r.post(
+  "/admin/:serverId/mailboxes/:email/webmail-handoff",
+  { tag: "mail_server:write" },
+  admin.createMailboxWebmailHandoffHandler,
 );
 r.get(
   "/admin/:serverId/mailboxes/:email",
@@ -211,4 +217,3 @@ r.post(
 );
 
 export const mailRoutes = r.hono;
-

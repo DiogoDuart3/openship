@@ -62,6 +62,7 @@ import {
 import { sshManager } from "../../../lib/ssh-manager";
 import { decrypt } from "../../../lib/encryption";
 import { readState } from "../mail-state";
+import { createMailboxWebmailHandoff } from "./webmail-handoff.service";
 
 /**
  * Org-scoped guard: confirms the path's :serverId belongs to the caller's
@@ -451,6 +452,28 @@ export async function getMailboxHandler(c: Context) {
     if (!row) return c.json({ error: "Mailbox not found" }, 404);
     return c.json({ mailbox: row });
   } catch (err) {
+    return errorJson(c, err);
+  }
+}
+
+export async function createMailboxWebmailHandoffHandler(c: Context) {
+  const guard = assertNotCloud(c);
+  if (guard) return guard;
+  const serverId = param(c, "serverId");
+  await permission.assert(getRequestContext(c), { resourceType: "mail_server", resourceId: serverId, action: "write" });
+  const ctx = getRequestContext(c);
+  if (!(await isServerInOrg(ctx, serverId))) return c.json({ error: "Server not found" }, 404);
+  const email = c.req.param("email");
+  if (!email) return c.json({ error: "email required" }, 400);
+  try {
+    c.header("Cache-Control", "no-store");
+    return c.json(await createMailboxWebmailHandoff(serverId, email));
+  } catch (err) {
+    const message = safeErrorMessage(err);
+    if (message === "Mailbox not found") return c.json({ error: message }, 404);
+    if (message === "Mailbox is disabled" || message === "Webmail is not installed") {
+      return c.json({ error: message }, 400);
+    }
     return errorJson(c, err);
   }
 }

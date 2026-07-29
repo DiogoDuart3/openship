@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Check,
   Copy,
+  ExternalLink,
   KeyRound,
   Loader2,
   Pencil,
@@ -43,6 +44,7 @@ interface MailboxesTabProps {
   serverId: string;
   primaryDomain: string;
   selectedDomain: string;
+  webmailUrl?: string;
   onSelectDomain: (domain: string) => void;
 }
 
@@ -50,6 +52,7 @@ export function MailboxesTab({
   serverId,
   primaryDomain,
   selectedDomain,
+  webmailUrl,
   onSelectDomain,
 }: MailboxesTabProps) {
   const { showModal, hideModal } = useModal();
@@ -59,6 +62,7 @@ export function MailboxesTab({
   const [loadingDomains, setLoadingDomains] = useState(true);
   const [loadingMailboxes, setLoadingMailboxes] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [handoffLoading, setHandoffLoading] = useState<string | null>(null);
 
   const activeDomain = selectedDomain || primaryDomain;
   const activeDomainRow = useMemo(
@@ -170,6 +174,22 @@ export function MailboxesTab({
         />
       ),
     });
+  };
+
+  const openWebmail = async (row: AdminMailbox) => {
+    if (!webmailUrl || !row.active || handoffLoading) return;
+    const popup = window.open("about:blank", "_blank");
+    setHandoffLoading(row.username);
+    try {
+      const result = await mailAdminApi.mailboxes.webmailHandoff(serverId, row.username);
+      if (popup && !popup.closed) popup.location.href = result.url;
+      else window.location.assign(result.url);
+    } catch (err) {
+      popup?.close();
+      setError(getApiErrorMessage(err, t.emailsAdmin.mailboxes.loadFailed));
+    } finally {
+      setHandoffLoading(null);
+    }
   };
 
   const columns: DataTableColumn<AdminMailbox>[] = [
@@ -297,6 +317,13 @@ export function MailboxesTab({
         loading={loadingMailboxes}
         rowActions={(row) => (
           <>
+            {webmailUrl && row.active && (
+              <RowIconButton
+                icon={handoffLoading === row.username ? Loader2 : ExternalLink}
+                label={t.emailsAdmin.overview.openWebmail}
+                onClick={() => void openWebmail(row)}
+              />
+            )}
             <RowIconButton
               icon={Pencil}
               label={t.emailsAdmin.mailboxes.editAction}

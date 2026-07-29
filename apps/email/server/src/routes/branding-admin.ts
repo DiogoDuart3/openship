@@ -42,7 +42,7 @@ const patchSchema = z.object({
  * leak the token byte-by-byte. Standard practice for any shared secret
  * compared on the request path.
  */
-function tokenEquals(provided: string, expected: string): boolean {
+export function tokenEquals(provided: string, expected: string): boolean {
   const a = Buffer.from(provided);
   const b = Buffer.from(expected);
   if (a.length !== b.length) return false;

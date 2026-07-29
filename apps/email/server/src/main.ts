@@ -34,6 +34,7 @@ import { buildContext } from './ctx';
 import { getSession } from './lib/session';
 import { getBranding, assetsDir } from './lib/branding';
 import { brandingAdminRoute } from './routes/branding-admin';
+import { handoffAdminRoute } from './routes/handoff-admin';
 
 const app = new Hono();
 
@@ -103,6 +104,7 @@ app.route('/mail', idleRoute);
 // here using the shared BRANDING_ADMIN_TOKEN. Reads (`/branding.json`)
 // stay unauthenticated for the login page.
 app.route('/admin', brandingAdminRoute);
+app.route('/admin', handoffAdminRoute);
 
 // The upstream Zero client posts to /api/trpc; we keep /trpc as a
 // convenience for curl + the openship dashboard. `endpoint` MUST match

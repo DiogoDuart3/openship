@@ -33,13 +33,13 @@ export function buildContext(
     imap: {
       host: session.imapHost,
       port: session.imapPort,
-      user: session.email,
+      user: session.authUser,
       pass: session.password,
     },
     smtp: {
       host: session.smtpHost,
       port: session.smtpPort,
-      user: session.email,
+      user: session.authUser,
       pass: session.password,
     },
     hono,

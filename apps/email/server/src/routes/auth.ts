@@ -28,6 +28,7 @@ import { eq, inArray } from 'drizzle-orm';
 import { createRateLimiter } from '../lib/rate-limit';
 import { audit } from '../lib/audit-log';
 import { clientIp } from '../lib/client-ip';
+import { consumeHandoff } from '../lib/handoff';
 
 export const authRoutes = new Hono();
 
@@ -110,7 +111,7 @@ function evictShadowCookies(c: any) {
   }
 }
 
-function setActiveCookies(c: any, sessionId: string, expiresAt: Date) {
+export function setActiveCookies(c: any, sessionId: string, expiresAt: Date) {
   evictShadowCookies(c);
   setCookie(c, env.SESSION_COOKIE_NAME, sessionId, { ...COOKIE_OPTS, expires: expiresAt });
   setCookie(c, ACTIVE_ID_COOKIE_NAME, sessionId, {
@@ -128,7 +129,7 @@ function clearActiveCookies(c: any) {
 // Parse the multi-session cookie, dedupe, and drop ids whose rows no
 // longer exist (expired/deleted). Returns the surviving list, freshest
 // first.
-async function readLiveSessionIds(raw: string | undefined): Promise<string[]> {
+export async function readLiveSessionIds(raw: string | undefined): Promise<string[]> {
   if (!raw) return [];
   const ids = Array.from(
     new Set(
@@ -150,7 +151,7 @@ async function readLiveSessionIds(raw: string | undefined): Promise<string[]> {
   return ids.filter((id) => alive.has(id));
 }
 
-function writeSessionListCookie(c: any, ids: string[], expiresAt?: Date) {
+export function writeSessionListCookie(c: any, ids: string[], expiresAt?: Date) {
   if (ids.length === 0) {
     deleteCookie(c, LIST_COOKIE_NAME, COOKIE_OPTS);
     return;
@@ -347,6 +348,22 @@ authRoutes.get('/session', async (c) => {
     name: session.name,
     expiresAt: session.expiresAt.toISOString(),
   });
+});
+
+// One-use, short-lived admin handoff. The token is consumed before any
+// redirect so copying/reloading the URL cannot reuse the mailbox session.
+authRoutes.get('/handoff', async (c) => {
+  const token = c.req.query('token');
+  const record = token ? consumeHandoff(token) : null;
+  if (!record) return c.redirect('/login?error=handoff_expired');
+  const session = await getSession(record.sessionId);
+  if (!session || session.expiresAt.getTime() > record.expiresAt.getTime()) {
+    return c.redirect('/login?error=handoff_expired');
+  }
+  const existingIds = await readLiveSessionIds(getCookie(c, LIST_COOKIE_NAME));
+  setActiveCookies(c, session.sessionId, session.expiresAt);
+  writeSessionListCookie(c, [session.sessionId, ...existingIds.filter((id) => id !== session.sessionId)], session.expiresAt);
+  return c.redirect('/mail/inbox');
 });
 
 // Returns metadata for every session the browser is signed into. This is

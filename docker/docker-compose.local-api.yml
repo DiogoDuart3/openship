@@ -1,0 +1,17 @@
+# TEMPORARY local-build override for the API service.
+#
+# Points the api service at an image built from this working tree instead of
+# the published ghcr.io/oblien/openship-api tag, so the mail-setup fix (skip the
+# host OpenResty when the edge is containerized) is live before it is released.
+# Layer it AFTER the other compose files:
+#
+#   docker compose -p openship \
+#     -f docker/docker-compose.yml \
+#     -f docker/docker-compose.host-control.yml \
+#     -f docker/docker-compose.local-api.yml \
+#     --env-file .env up -d --no-deps --force-recreate api
+#
+# To go back to the released image, drop this file from the -f list and rerun.
+services:
+  api:
+    image: openship-api:worktree-test

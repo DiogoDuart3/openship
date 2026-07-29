@@ -13,8 +13,8 @@
  *
  * If you change `schema.ts`:
  *   - Adding a table → add another `CREATE TABLE IF NOT EXISTS` here.
- *   - Adding a column → add `ALTER TABLE … ADD COLUMN IF NOT EXISTS`
- *     (SQLite 3.35+).
+ *   - Adding a column → inspect `PRAGMA table_info` and issue an ALTER only
+ *     when the column is absent (SQLite has no ADD COLUMN IF NOT EXISTS).
  *   - Renaming/dropping → write a one-shot migration in here gated
  *     by a `PRAGMA user_version` bump.
  *
@@ -28,6 +28,7 @@ const STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS session (
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL,
+    auth_user TEXT NOT NULL DEFAULT '',
     name TEXT,
     encrypted_password BLOB NOT NULL,
     imap_host TEXT NOT NULL,
@@ -79,5 +80,12 @@ const STATEMENTS = [
 export function bootstrapSchema(sqlite: Database): void {
   for (const sql of STATEMENTS) {
     sqlite.exec(sql);
+  }
+  // SQLite does not support `IF NOT EXISTS` on ADD COLUMN. Inspect the
+  // existing table so upgrades remain idempotent for databases created by an
+  // older webmail release.
+  const columns = sqlite.query('PRAGMA table_info(session)').all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === 'auth_user')) {
+    sqlite.exec("ALTER TABLE session ADD COLUMN auth_user TEXT NOT NULL DEFAULT ''");
   }
 }

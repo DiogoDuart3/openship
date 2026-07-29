@@ -319,6 +319,11 @@ export async function resolveTargetPlatform(
         target: "selfhosted",
         runtime: runtimeMode,
         executor,
+        // The executor is local, so this platform must be treated as the local
+        // target — otherwise createSelfHostedPlatform reads the injected
+        // executor as "remote server" and skips the containerized edge, routing
+        // the box's own vhosts to a host OpenResty that serves nothing.
+        localHost: true,
         docker: runtimeMode === "docker" ? { transport: "socket" as const } : undefined,
         provisionLock: createProvisionLock("provision:local"),
       });

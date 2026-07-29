@@ -30,6 +30,8 @@ export const session = sqliteTable(
     /** The full email address the user signed in with - that's the
      *  identity. There is no separate user table. */
     email: text('email').notNull(),
+    /** Raw IMAP/SMTP auth username. Normal sessions use email; admin handoffs use email*master. */
+    authUser: text('auth_user').notNull().default(''),
     /** Display name, pulled from IMAP server response if available. */
     name: text('name'),
     /** AES-GCM-encrypted IMAP password. Decrypted per request to open

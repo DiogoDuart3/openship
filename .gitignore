@@ -29,6 +29,14 @@ apps/cli/README.md
 # Dev-only generated secrets (per-machine, not for prod)
 .dev-secrets.json
 
+# Per-box host-control SSH keypair (mounted into the api container — see
+# docker/docker-compose.host-control.yml) — never belongs in git history.
+host-control-key
+host-control-key.pub
+
+# Local ad-hoc DB dump snapshots taken before risky ops — not release artifacts.
+*.dump
+
 # IDE
 .vscode/
 .idea/

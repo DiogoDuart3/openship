@@ -147,12 +147,24 @@ export async function detectOpenRestyPaths(
  *
  * Primary: `openresty -t` then `openresty -s reload` (graceful, zero-downtime).
  * Fallback: if reload fails (e.g. not running), kill everything and start fresh.
+ *
+ * The kill-and-restart fallback is SKIPPED when openresty is PID 1 — i.e. a
+ * containerized edge (OPENSHIP_EDGE_MODE), where it is the container's init.
+ * `pkill` there kills PID 1, so the whole edge container dies mid-exec: the
+ * docker exec returns non-zero, registerRoute's self-rollback restores the
+ * PREVIOUS vhost, and the deploy reports "Routing failed" while every site on
+ * the box blips. Restarting a dead master is the container supervisor's job in
+ * that mode, so fail loudly (surfacing the reload's real stderr) instead.
  */
 export function buildReloadCommand(paths: OpenRestyPaths): string {
   return `${paths.bin} -t 2>&1 || exit 1
 
-if ${paths.bin} -s reload 2>/dev/null; then
-  exit 0
+reload_err=$(${paths.bin} -s reload 2>&1) && exit 0
+
+if [ "$(cat /proc/1/comm 2>/dev/null)" = "openresty" ] || [ "$(cat /proc/1/comm 2>/dev/null)" = "nginx" ]; then
+  echo "openresty reload failed and openresty is PID 1 (containerized edge) — not killing it; the container supervisor owns restarts." >&2
+  echo "$reload_err" >&2
+  exit 1
 fi
 
 pkill -f '[o]penresty' >/dev/null 2>&1 || true
@@ -239,14 +251,23 @@ http {
     default_type  application/octet-stream;
     sendfile      on;
     keepalive_timeout 65;
+    # See apps/edge/nginx.conf: the 64-byte default fails \`nginx -t\` outright
+    # ("could not build server_names_hash") for any server_name past ~63 chars,
+    # which refuses the reload and wedges every route on the box, not just the
+    # long one. Keep this in step with the containerized edge's value.
+    server_names_hash_bucket_size 128;
     include ${sitesDir}/*.conf;
 }
 `;
 }
 const GEOIP_DIR = "/usr/share/GeoIP";
 const GEOIP_DB_PATH = `${GEOIP_DIR}/GeoLite2-Country.mmdb`;
+// `/releases/latest/download/...` redirects to whatever tag is current — a
+// pinned tag (e.g. `.../releases/download/2026.04.07/...`) 404s the moment
+// that dated release rolls off P3TERX's mirror, silently breaking every
+// self-hosted install's geo lookups (installGeoDeps swallows the failure).
 const GEOIP_DB_URL =
-  "https://github.com/P3TERX/GeoLite.mmdb/releases/download/2026.04.07/GeoLite2-Country.mmdb";
+  "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-Country.mmdb";
 
 // ── Local Lua source directory ───────────────────────────────────────────────
 
