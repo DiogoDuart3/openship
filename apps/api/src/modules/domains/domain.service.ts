@@ -14,21 +14,28 @@
  * in the SSL status pill on the next read.
  */
 
-import { repos, type Domain, type Project } from "@repo/db";
-import { NotFoundError, ConflictError, ValidationError, safeErrorMessage, normalizeCustomHostname, isValidCustomHostname, SYSTEM } from "@repo/core";
+import { repos, normalizeRoutingFields, type Domain, type Project } from "@repo/db";
+import { NotFoundError, ConflictError, ValidationError, safeErrorMessage, normalizeCustomHostname, isValidCustomHostname, wwwSiblingHostname, SYSTEM } from "@repo/core";
 import { platform, assertResourceInOrg } from "../../lib/controller-helpers";
 import { buildBackgroundContext, type RequestContext } from "../../lib/request-context";
-import { manageDomainSsl, installDomainCert, provisionDomainCertForVerify, verifyExistingCert } from "../../lib/domain-ssl";
+import {
+  manageDomainSsl,
+  installDomainCert,
+  provisionDomainCertForVerify,
+  verifyExistingCert,
+  tlsIssuedElsewhere,
+} from "../../lib/domain-ssl";
 import { getRoutingBaseDomain } from "../../lib/routing-domains";
 import { resolveRecords } from "../../lib/dns-resolver";
-import { resolveProjectServerHost } from "../../lib/server-target";
+import { resolveProjectServerHost, resolveLocalServerHost, resolveInstancePublicIp, isLoopbackHost } from "../../lib/server-target";
 import { reconcileProjectRoutes } from "../../lib/route-apply.service";
 import { generateToken } from "../../lib/domain-token";
+import { publicEndpointHostname, resolveServicePublicEndpoints } from "../../lib/public-endpoints";
 import { sshManager } from "../../lib/ssh-manager";
 import type { DeploymentMeta } from "../../lib/deployment-runtime";
-import { scanProxyRoutesWithExecutor } from "../migration/proxy-route-scan";
 import type { TAddDomainBody } from "./domain.schema";
-import type { CloudRuntime, CommandExecutor, ManualCert } from "@repo/adapters";
+import { edgeProxy, readEdgeFile, validateCertFor } from "@repo/adapters";
+import type { AdoptedCert, CloudRuntime, CommandExecutor, ManualCert } from "@repo/adapters";
 
 // ─── List ────────────────────────────────────────────────────────────────────
 
@@ -117,6 +124,13 @@ export async function addDomain(ctx: RequestContext, data: TAddDomainBody) {
     if (data.isPrimary && !existing.isPrimary) {
       await repos.domain.setPrimary(data.projectId, existing.id);
     }
+    // Re-saving with the toggle on must be able to ADD the www row that a first
+    // save (or an older build) never created.
+    if (data.includeWww) {
+      await addWwwSibling(ctx, data, hostname).catch((err) =>
+        console.warn(`[domains] www.${hostname} not added: ${safeErrorMessage(err)}`),
+      );
+    }
 
     const domain = {
       ...existing,
@@ -154,8 +168,52 @@ export async function addDomain(ctx: RequestContext, data: TAddDomainBody) {
     await repos.domain.setPrimary(data.projectId, domain.id);
   }
 
+  // "Include www" is a REQUEST FOR A SECOND HOSTNAME, so it has to exist as its own
+  // row: verification, DNS records, SSL and routing are all keyed per row, and
+  // `manageDomainSsl`'s www branch explicitly looks for `www.<host>` in the domain
+  // table. Without this the toggle set a flag nothing ever read (issue #289).
+  //
+  // Best-effort: the apex is what the caller asked for and already succeeded. A www
+  // that can't be claimed (already taken by another project, invalid) must not undo
+  // it — the apex stays, and the operator can add www by hand.
+  if (data.includeWww) {
+    await addWwwSibling(ctx, data, hostname).catch((err) =>
+      console.warn(`[domains] www.${hostname} not added: ${safeErrorMessage(err)}`),
+    );
+  }
+
   const records = await buildRecords(domain.hostname, token, project, domain.externalIngress);
   return { domain, records };
+}
+
+/**
+ * "Include www" asks for a SECOND routable hostname, not a flag on the apex row: the
+ * edge binds one `server_name` per row, and `domain-ssl.ts`'s www branch resolves the
+ * variant BY HOSTNAME — so it only exists once it has a row, which then verifies and
+ * certs on its own.
+ *
+ * Recurses through `addDomain` on purpose: hostname validation, the cross-project
+ * conflict check and the interrupted-connect retry path all live there and must apply
+ * to the variant too. Runs AFTER the apex so an apex conflict aborts before we mint a
+ * sibling, and the apex keeps `isPrimary`.
+ *
+ * NOTE: the row alone is not enough — `syncProjectPublicRoutes` deletes project-level
+ * rows the submitted endpoint list omits, so the caller must also include
+ * `www.<apex>` in `publicEndpoints` (the dashboard does this in the same save).
+ */
+async function addWwwSibling(
+  ctx: RequestContext,
+  data: TAddDomainBody,
+  hostname: string,
+): Promise<void> {
+  const www = wwwSiblingHostname(hostname);
+  if (!www) return;
+  await addDomain(ctx, {
+    projectId: data.projectId,
+    hostname: www,
+    isPrimary: false,
+    externalIngress: data.externalIngress,
+  });
 }
 
 /**
@@ -248,9 +306,13 @@ export async function removeServiceDomain(opts: {
 
 // ─── Preview records (no auth, no DB write) ──────────────────────────────────
 
-export async function previewRecords(hostname: string) {
+export async function previewRecords(
+  hostname: string,
+  organizationId?: string,
+  includeWww = false,
+) {
   const token = generateToken(hostname);
-  return buildRecords(hostname, token);
+  return buildRecords(hostname, token, undefined, false, organizationId, includeWww);
 }
 
 // ─── Get DNS records (existing domain) ───────────────────────────────────────
@@ -258,7 +320,7 @@ export async function previewRecords(hostname: string) {
 export async function getDomainRecords(ctx: RequestContext, domainId: string) {
   const { domain, project } = await getDomainWithAuth(domainId, ctx.organizationId);
   const token = domain.verificationToken ?? generateToken(domain.hostname);
-  return buildRecords(domain.hostname, token, project, domain.externalIngress);
+  return buildRecords(domain.hostname, token, project, domain.externalIngress, ctx.organizationId);
 }
 
 /**
@@ -276,19 +338,35 @@ async function promoteCustomDomainToPrimary(domain: Domain, domainId: string): P
   }
 }
 
-/** Flip a row to verified + SSL active (+ promote), reusing an existing cert. */
+/** Should this row take primary? See {@link promoteCustomDomainToPrimary}. */
+async function shouldPromoteToPrimary(domain: Domain, domainId: string): Promise<boolean> {
+  if (!domain.projectId || domain.domainType !== "custom") return false;
+  const peers = await repos.domain.listByProject(domain.projectId);
+  return !peers.some((p) => p.id !== domainId && p.isPrimary && p.domainType === "custom");
+}
+
+/**
+ * Flip a row to verified + SSL active (+ promote), reusing an existing cert.
+ *
+ * One transaction, because the three writes describe one outcome. As separate
+ * awaits, a failure in the middle left the row verified with no active SSL — and
+ * the cert is already on disk by this point, so the box serves the domain while the
+ * dashboard still shows it pending, with nothing to retry.
+ */
 async function markDomainVerifiedActive(
   domain: Domain,
   domainId: string,
   ssl: { issuer?: string; expiresAt?: string; manualSsl?: boolean },
 ): Promise<void> {
-  await repos.domain.markVerified(domainId);
-  await promoteCustomDomainToPrimary(domain, domainId);
-  await repos.domain.updateSsl(domainId, {
+  const promote = (await shouldPromoteToPrimary(domain, domainId)) && domain.projectId
+    ? { projectId: domain.projectId }
+    : undefined;
+  await repos.domain.markVerifiedActive(domainId, {
     sslStatus: "active",
     ...(ssl.manualSsl ? { manualSsl: true } : {}),
     ...(ssl.issuer ? { sslIssuer: ssl.issuer } : {}),
     ...(ssl.expiresAt ? { sslExpiresAt: new Date(ssl.expiresAt) } : {}),
+    ...(promote ? { promote } : {}),
   });
 }
 
@@ -316,11 +394,9 @@ async function withServerHostExecutor<T>(
 ): Promise<T | null> {
   const serverId = await resolveServerIdForProject(project);
   if (!serverId) return null;
-  const server = await repos.server.getInOrganization(serverId, ctx.organizationId).catch(() => null);
-  if (server?.isLocal) {
-    const { createHostExecutor } = await import("@repo/adapters");
-    return fn(createHostExecutor());
-  }
+  // No local/remote branch: `acquire` already returns the pooled HOST channel for a
+  // local row. The old branch handed out a fresh `createHostExecutor()` per call and
+  // never closed it — one leaked sshd session per domain/SSL status read (#291).
   return sshManager.withExecutor(serverId, fn).catch(() => null);
 }
 
@@ -346,12 +422,18 @@ async function edgeHostUnreachable(ctx: RequestContext, project: Project): Promi
   if (!serverId) return false;
   const server = await repos.server.getInOrganization(serverId, ctx.organizationId).catch(() => null);
   if (!server?.isLocal) return false;
-  const { createHostExecutor } = await import("@repo/adapters");
-  const exec = createHostExecutor();
-  return (
-    (await exec.exists("/.dockerenv").catch(() => false)) ||
-    (await exec.exists("/run/.containerenv").catch(() => false))
-  );
+  return sshManager
+    .withHostExecutor(
+      async (exec) =>
+        (await exec.exists("/.dockerenv").catch(() => false)) ||
+        (await exec.exists("/run/.containerenv").catch(() => false)),
+    )
+    // Acquiring the host channel THROWS when the API is containerized with no
+    // channel provisioned — which is precisely this function's "unreachable" case,
+    // so it must answer TRUE. Answering false would let verify march on to a
+    // certbot attempt that fails far from the cause, instead of surfacing
+    // HOST_CHANNEL_HINT below.
+    .catch(() => true);
 }
 
 const HOST_CHANNEL_HINT =
@@ -368,20 +450,28 @@ function isPathSafeHostname(hostname: string): boolean {
 /**
  * Migration / first-publish SSL reuse. When a custom-domain row is freshly minted
  * for a hostname the SERVER ALREADY serves — an Openship re-migration on the same
- * box, or a foreign reverse proxy (nginx bare OR container) we're taking over —
- * adopt the cert that's already there instead of re-issuing via ACME (which fails
- * behind Cloudflare, or when the cert isn't at certbot's standard path). Sources,
- * in order, all read on the HOST executor so it works when the API is containerized:
+ * box, or a foreign reverse proxy (nginx/caddy/apache/traefik, bare OR container)
+ * we're taking over — adopt the cert that's already there instead of re-issuing via
+ * ACME (which fails behind Cloudflare, or when the cert isn't at certbot's standard
+ * path). Sources, in order, all read on the HOST executor so it works when the API
+ * is containerized:
  *   1. certbot's /etc/letsencrypt on the serving host, via the platform provider
  *      (verifyExistingCert).
- *   2. the host's /etc/letsencrypt/live/<host>/{fullchain,privkey}.pem read
- *      directly on the HOST executor — the bare-edge case where the API
- *      container's own /etc/letsencrypt is a different volume.
- *   3. the edge vhost's cert files (scanProxyRoutes → certPath/keyPath), read off
- *      the host and installed as a manual cert (foreign-proxy migration).
+ *   2. the host's certbot lineage dir read directly on the HOST executor — the
+ *      bare-edge case where the API container's own /etc/letsencrypt is a
+ *      different volume. Includes the `-0001` re-issue lineages, which a bare
+ *      `live/<host>` lookup misses entirely.
+ *   3. whatever the edge proxy itself serves, via `edgeProxy().certFor()` — our
+ *      OpenResty at a non-standard path, an nginx/apache declared path, caddy's
+ *      own cert store, or traefik's acme.json.
+ *
+ * Every candidate goes through `validateCertFor`, so a cert that doesn't cover this
+ * hostname or has already expired is REJECTED rather than installed — the row stays
+ * pending for the ACME path instead of serving a name-mismatched cert under a green
+ * padlock.
+ *
  * Self-hosted only; best-effort + non-fatal (domains never fail a deploy, see
- * [[domains-never-fail-deploy]]). No-op when nothing is reusable → the row stays
- * pending for the manual Verify (ACME) path. Returns true when it adopted a cert.
+ * [[domains-never-fail-deploy]]). Returns true when it adopted a cert.
  */
 export async function reuseServerCertForDomain(ctx: RequestContext, domainId: string): Promise<boolean> {
   try {
@@ -396,16 +486,31 @@ export async function reuseServerCertForDomain(ctx: RequestContext, domainId: st
       return false;
     }
 
-    const installReused = async (cert: ManualCert) => {
+    /**
+     * Install an adopted cert and flip the row.
+     *
+     * `manualSsl` is set ONLY for a cert certbot can't reissue. It used to be set
+     * unconditionally, and `tlsIssuedElsewhere` reads it as "not ours to renew", so
+     * the SSL scheduler filtered the row out of every renewal batch — an adopted
+     * 90-day Let's Encrypt cert was never renewed and the domain went dark on day
+     * 90. A public-ACME-issued cert is ours to renew; a Cloudflare Origin CA or
+     * internal-PKI cert genuinely isn't.
+     */
+    const installReused = async (cert: AdoptedCert) => {
       const result = await installDomainCert(domain.hostname, cert, {
         projectId: domain.projectId ?? undefined,
         allowUnverified: true,
       });
       await markDomainVerifiedActive(domain, domainId, {
-        issuer: "reused",
-        manualSsl: true,
-        expiresAt: result.expiresAt || undefined,
+        issuer: cert.renewable ? "reused" : cert.issuer,
+        ...(cert.renewable ? {} : { manualSsl: true }),
+        expiresAt: result.expiresAt || cert.expiresAt,
       });
+      console.log(
+        `[DOMAIN] adopted cert for ${domain.hostname} from ${cert.source} ` +
+          `(issuer "${cert.issuer}", expires ${cert.expiresAt}, ` +
+          `${cert.renewable ? "renewable by certbot" : "manual — certbot can't reissue"})`,
+      );
     };
 
     // 1. A cert is already at certbot's standard path, reachable via the platform
@@ -421,15 +526,22 @@ export async function reuseServerCertForDomain(ctx: RequestContext, domainId: st
       return true;
     }
 
-    // 2. Read the host's /etc/letsencrypt directly on the HOST executor — covers a
+    const rejections: string[] = [];
+
+    // 2. Read the host's certbot store directly on the HOST executor — covers a
     //    bare-metal edge whose certs live on the host while the API container's own
     //    /etc/letsencrypt is a separate, empty volume.
     if (isPathSafeHostname(domain.hostname)) {
-      const base = `/etc/letsencrypt/live/${domain.hostname}`;
       const hostCert = await withServerHostExecutor(ctx, project, async (exec) => {
-        const certPem = await exec.readFile(`${base}/fullchain.pem`).catch(() => "");
-        const keyPem = await exec.readFile(`${base}/privkey.pem`).catch(() => "");
-        return certPem.trim() && keyPem.trim() ? { certPem, keyPem } : null;
+        for (const base of await certbotLineageDirs(exec, domain.hostname)) {
+          const certPem = await readEdgeFile(exec, `${base}/fullchain.pem`);
+          const keyPem = await readEdgeFile(exec, `${base}/privkey.pem`);
+          if (!certPem.trim() || !keyPem.trim()) continue;
+          const candidate = validateCertFor(domain.hostname, { certPem, keyPem }, base);
+          if (candidate.cert) return candidate.cert;
+          rejections.push(candidate.reason);
+        }
+        return null;
       }).catch(() => null);
       if (hostCert) {
         await installReused(hostCert);
@@ -437,26 +549,56 @@ export async function reuseServerCertForDomain(ctx: RequestContext, domainId: st
       }
     }
 
-    // 3. A cert served by the edge vhost (our OpenResty at a non-standard path, or
-    //    a foreign proxy we're migrating from) — scan the edge + read the
-    //    referenced files, all on the HOST executor so it works on the local
-    //    host-server too (scanProxyRoutes' own sshManager can't reach that box).
-    const host = domain.hostname.toLowerCase();
-    const cert = await withServerHostExecutor(ctx, project, async (exec) => {
-      const routes = await scanProxyRoutesWithExecutor(exec);
-      const match = [...routes.values()].flat().find(
-        (r) => r.ssl.enabled && r.ssl.certPath && r.ssl.keyPath && r.domains.some((d) => d.toLowerCase() === host),
-      );
-      if (!match?.ssl.certPath || !match.ssl.keyPath) return null;
-      return { certPem: await exec.readFile(match.ssl.certPath), keyPem: await exec.readFile(match.ssl.keyPath) };
+    // 3. Whatever the edge proxy currently serves for this host — one reader for
+    //    every proxy kind, so caddy's store and traefik's acme.json are reachable
+    //    here and not just declared nginx/apache paths.
+    const fromProxy = await withServerHostExecutor(ctx, project, async (exec) => {
+      const proxy = await edgeProxy(exec);
+      if (!proxy) return null;
+      const candidate = await proxy.certCandidateFor(domain.hostname);
+      if (candidate.cert) return candidate.cert;
+      rejections.push(candidate.reason);
+      return null;
     }).catch(() => null);
-    if (!cert?.certPem?.trim() || !cert?.keyPem?.trim()) return false;
-    await installReused(cert);
-    return true;
+    if (fromProxy) {
+      await installReused(fromProxy);
+      return true;
+    }
+
+    // Nothing adoptable. Say WHY when we found material and turned it down — a
+    // silent fallthrough to ACME looks identical to "there was no cert", and these
+    // are the two cases an operator debugging a pending domain needs to tell apart.
+    if (rejections.length > 0) {
+      console.warn(`[DOMAIN] no reusable cert for ${domain.hostname}: ${rejections.join("; ")}`);
+    }
+    return false;
   } catch (err) {
     console.error(`[DOMAIN] cert reuse failed for ${domainId}:`, safeErrorMessage(err));
     return false;
   }
+}
+
+/**
+ * Certbot lineage directories that could hold this hostname's cert, best first.
+ *
+ * Certbot names a lineage after the first domain in it, and on re-issue with a
+ * changed name set it creates a SIBLING — `example.com-0001` — leaving the original
+ * behind. Only checking `live/<host>` therefore misses the live cert on any box
+ * that's had its domain set edited, and the reuse silently fell through to ACME.
+ * The glob is sorted descending so the newest lineage is tried first.
+ */
+async function certbotLineageDirs(exec: CommandExecutor, hostname: string): Promise<string[]> {
+  const base = `/etc/letsencrypt/live/${hostname}`;
+  const listing = await exec
+    .exec(`ls -1d ${base} ${base}-[0-9][0-9][0-9][0-9] 2>/dev/null`)
+    .catch(() => "");
+  const dirs = listing
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith(base))
+    .sort()
+    .reverse();
+  return dirs.length > 0 ? dirs : [base];
 }
 
 // ─── Verify ──────────────────────────────────────────────────────────────────
@@ -698,7 +840,58 @@ export async function removeDomain(ctx: RequestContext, domainId: string) {
     console.error(`[DOMAIN] Failed to remove route for ${domain.hostname}:`, err);
   }
 
+  // A service-scoped row is only HALF the routing config — the owning SERVICE row
+  // also carries `exposed`/`domain`/`customDomain`/`publicEndpoints`. Deleting
+  // just the domain row left the service still configured for that hostname,
+  // which is why removing a free route then made every later action demand Cloud:
+  // preflight's `servicesNeedCloud` kept seeing the stale *.opsh.io slug and
+  // reported "Connect Openship Cloud to expose services on free *.opsh.io
+  // subdomains" — even while the user was adding a CUSTOM domain.
+  //
+  // ONE transaction, because the two writes describe one outcome. As separate
+  // awaits a failure between them recreates exactly that stale state, with the
+  // row already gone so there's nothing left to retry against.
+  const serviceRouting = domain.serviceId
+    ? await resolveRemainingServiceRouting(domain.serviceId, domain.hostname)
+    : null;
+
+  if (domain.serviceId && serviceRouting) {
+    await repos.domain.removeWithServiceRouting(domainId, {
+      serviceId: domain.serviceId,
+      routing: serviceRouting,
+    });
+    return;
+  }
+
   await repos.domain.remove(domainId);
+}
+
+/**
+ * The routing columns a service should keep once `hostname` is gone: the
+ * surviving endpoints, or fully unexposed when none remain — "exposed with no
+ * hostname" is the state that produces a dead Pending route.
+ *
+ * Pure resolution (one read, no writes) so the caller can commit it inside the
+ * same transaction as the domain delete. Returns null when the service row is
+ * missing, so the caller falls back to a plain delete.
+ */
+async function resolveRemainingServiceRouting(
+  serviceId: string,
+  hostname: string,
+): Promise<Record<string, unknown> | null> {
+  const svc = await repos.service.findById(serviceId);
+  if (!svc) return null;
+  const target = hostname.toLowerCase();
+
+  const remaining = resolveServicePublicEndpoints(svc).filter(
+    (endpoint) => publicEndpointHostname(endpoint)?.toLowerCase() !== target,
+  );
+
+  // Still serving something → stay exposed on the survivors, with entry[0]
+  // mirrored onto the scalar columns by normalizeRoutingFields.
+  return remaining.length > 0
+    ? { ...normalizeRoutingFields({ exposed: true, publicEndpoints: remaining }) }
+    : { ...normalizeRoutingFields({ exposed: false }) };
 }
 
 // ─── SSL ─────────────────────────────────────────────────────────────────────
@@ -798,12 +991,96 @@ export interface PendingVerificationResult {
   stillPending: number;
   failed: number;
   total: number;
+  /** Phase 2: certs issued for already-verified domains that had none. */
+  sslIssued?: number;
+  /** Phase 2: still without a cert, backed off for a later run. */
+  sslRetrying?: number;
   details: Array<{
     hostname: string;
     status: "verified" | "still_pending" | "failed";
     message?: string;
     error?: string;
   }>;
+}
+
+/**
+ * Per-hostname retry backoff for the SSL phase, in memory.
+ *
+ * Let's Encrypt allows ~5 failures per hostname per hour; a flat 13-minute retry
+ * burns that on a genuinely misconfigured domain and gets the whole account rate-
+ * limited. Doubles 15m → 30m → 1h → 2h → 4h, capped at 6h, and keeps trying at that
+ * cadence forever rather than giving up — the operator's DNS/firewall fix must heal
+ * itself without another manual click.
+ *
+ * Deliberately NOT a DB column: an API restart clearing it is the behaviour we want
+ * (a redeploy/restart is a strong signal something changed), and it avoids a
+ * migration for state that is worthless after a few hours.
+ */
+const sslRetryAt = new Map<string, { next: number; delayMs: number }>();
+const SSL_RETRY_MIN_MS = 15 * 60_000;
+const SSL_RETRY_MAX_MS = 6 * 60 * 60_000;
+
+function sslRetryDue(id: string): boolean {
+  const e = sslRetryAt.get(id);
+  return !e || Date.now() >= e.next;
+}
+
+function sslRetryScheduled(id: string): void {
+  const prev = sslRetryAt.get(id);
+  const delayMs = Math.min(prev ? prev.delayMs * 2 : SSL_RETRY_MIN_MS, SSL_RETRY_MAX_MS);
+  sslRetryAt.set(id, { next: Date.now() + delayMs, delayMs });
+}
+
+/** Issued (or externally handled) — stop backing off, so a re-break retries fast. */
+function sslRetryCleared(id: string): void {
+  sslRetryAt.delete(id);
+}
+
+/**
+ * Phase 2 of the domain sweep: finish TLS for domains that are already verified but
+ * never got a certificate.
+ *
+ * Reuses `manageDomainSsl("provision")`, the same locked/persisted issuance
+ * primitive as the interactive flow. A read-only `verifyDomainSsl` recheck is
+ * insufficient here: when the first ACME order genuinely failed there is no
+ * certificate to discover. Best-effort per domain, matching the golden rule:
+ * routing/TLS never fails anything, it only reports.
+ */
+async function issuePendingSsl(limit: number): Promise<{ issued: number; retrying: number }> {
+  const rows = await repos.domain.findPendingSsl(limit).catch(() => []);
+  let issued = 0;
+  let retrying = 0;
+
+  for (const d of rows) {
+    if (tlsIssuedElsewhere(d)) {
+      sslRetryCleared(d.id);
+      continue;
+    }
+    if (!sslRetryDue(d.id)) continue;
+
+    const project = await repos.project.findById(d.projectId).catch(() => null);
+    if (!project?.organizationId) continue;
+
+    try {
+      await manageDomainSsl(d.hostname, {
+        action: "provision",
+        projectId: d.projectId ?? undefined,
+      });
+      const after = await repos.domain.findById(d.id).catch(() => null);
+      if (after?.sslStatus === "active") {
+        issued++;
+        sslRetryCleared(d.id);
+      } else {
+        retrying++;
+        sslRetryScheduled(d.id);
+      }
+    } catch {
+      retrying++;
+      sslRetryScheduled(d.id);
+    }
+  }
+
+  return { issued, retrying };
 }
 
 export async function verifyPendingDomains(opts?: {
@@ -885,6 +1162,11 @@ export async function verifyPendingDomains(opts?: {
       });
     }
   }
+
+  // Phase 2, same sweep: verified domains whose cert never landed.
+  const ssl = await issuePendingSsl(limit).catch(() => ({ issued: 0, retrying: 0 }));
+  result.sslIssued = ssl.issued;
+  result.sslRetrying = ssl.retrying;
 
   return result;
 }
@@ -1015,7 +1297,13 @@ async function buildRecords(
   token: string,
   project?: Project,
   externalIngress = false,
+  organizationId?: string,
+  /** Mirror the "Include www" toggle: that toggle claims a SECOND hostname, so
+   *  the panel must show ITS record too. Without this the user turned www on and
+   *  saw only the apex record, then wondered why www never resolved. */
+  includeWww = false,
 ): Promise<{ mode: "cloud" | "selfhosted" | "external"; records: DnsRecord[] }> {
+  const wwwHostname = includeWww ? wwwSiblingHostname(hostname) : null;
   const { target, runtime } = platform();
 
   const { routeHost, routeName, txtHost, txtName } = dnsRecordHosts(hostname);
@@ -1034,10 +1322,28 @@ async function buildRecords(
       cnameTarget = result.requiredRecords.cname.target;
     } catch { /* Oblien unreachable */ }
 
-    return {
-      mode: "cloud",
-      records: [{ type: "CNAME", host: routeHost, name: routeName, value: cnameTarget ?? "" }, txt],
-    };
+    const records: DnsRecord[] = [
+      { type: "CNAME", host: routeHost, name: routeName, value: cnameTarget ?? "" },
+      txt,
+    ];
+    if (wwwHostname) {
+      // The www sibling is its OWN hostname, so it needs its own CNAME + the
+      // ownership TXT for that name — the shared edge verifies each separately.
+      const www = dnsRecordHosts(wwwHostname);
+      records.push({
+        type: "CNAME",
+        host: www.routeHost,
+        name: www.routeName,
+        value: cnameTarget ?? "",
+      });
+      records.push({
+        type: "TXT",
+        host: www.txtHost,
+        name: www.txtName,
+        value: generateToken(wwwHostname),
+      });
+    }
+    return { mode: "cloud", records };
   }
 
   // ── Self-hosted ──
@@ -1049,12 +1355,30 @@ async function buildRecords(
     return { mode: "external", records: [] };
   }
   // A record is GUIDANCE only ("point it here"). We never resolve it — a CDN in
-  // front would answer with its own IP — so it's a hint, not a gate.
-  const serverIp = await resolveProjectServerHost(project);
-  return {
-    mode: "selfhosted",
-    records: [{ type: "A", host: routeHost, name: routeName, value: serverIp ?? "" }],
-  };
+  // front would answer with its own IP — so it's a hint, not a gate. Read the
+  // box's public address (resolved once at ensure-server): the deployed project's
+  // server, else this org's "This Server" row for the pre-deploy preview.
+  let serverIp =
+    (await resolveProjectServerHost(project)) ??
+    (organizationId ? await resolveLocalServerHost(organizationId) : null);
+  // A loopback is the local row's display host when no public IP was known at
+  // registration — useless as "point your domain here". Re-detect live for this
+  // (user-initiated, off-hot-path) preview; leave EMPTY so the UI shows a
+  // placeholder rather than a dead `127.0.0.1` the operator would copy verbatim.
+  if (!serverIp || isLoopbackHost(serverIp)) {
+    const detected = await resolveInstancePublicIp().catch(() => null);
+    serverIp = detected && !isLoopbackHost(detected) ? detected : null;
+  }
+  const records: DnsRecord[] = [
+    { type: "A", host: routeHost, name: routeName, value: serverIp ?? "" },
+  ];
+  if (wwwHostname) {
+    // Same box, so the same A value — a CNAME to the apex would also work, but an
+    // A keeps both rows identical and independent of apex-CNAME restrictions.
+    const www = dnsRecordHosts(wwwHostname);
+    records.push({ type: "A", host: www.routeHost, name: www.routeName, value: serverIp ?? "" });
+  }
+  return { mode: "selfhosted", records };
 }
 
 /** Build a human-readable verification failure message. */

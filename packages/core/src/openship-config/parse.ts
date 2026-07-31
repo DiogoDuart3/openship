@@ -32,12 +32,14 @@ const TOP_LEVEL_KEYS = new Set([
   "framework",
   "packageManager",
   "rootDirectory",
+  "composePath",
   "installCommand",
   "buildCommand",
   "startCommand",
   "outputDirectory",
   "buildImage",
   "productionPaths",
+  "volumes",
   "runtime",
   "productionMode",
   "port",
@@ -230,11 +232,15 @@ function parseResources(ctx: Ctx, v: unknown, path: string): OpenshipResources |
     ctx.err(path, "must be an object");
     return undefined;
   }
+  // `0` = no limit (self-hosted default — the machine is the cap). The upper
+  // bounds are sanity rails only: the REAL ceiling is the target machine's
+  // probed capacity, enforced server-side. A flat 4-core / 8192 MB max here made
+  // a large self-hosted box impossible to describe.
   const r: OpenshipResources = {
     tier: ctx.enumOf(v.tier, `${path}.tier`, OPENSHIP_RESOURCE_TIERS),
-    cpuCores: ctx.int(v.cpuCores, `${path}.cpuCores`, 0.25, 4),
-    memoryMb: ctx.int(v.memoryMb, `${path}.memoryMb`, 128, 8192),
-    diskMb: ctx.int(v.diskMb, `${path}.diskMb`, 64, 204800),
+    cpuCores: ctx.int(v.cpuCores, `${path}.cpuCores`, 0, 1024),
+    memoryMb: ctx.int(v.memoryMb, `${path}.memoryMb`, 0, 4194304),
+    diskMb: ctx.int(v.diskMb, `${path}.diskMb`, 0, 204800),
   };
   return r;
 }
@@ -296,6 +302,7 @@ function parseServices(ctx: Ctx, v: unknown, path: string): OpenshipService[] | 
       exposedPort: ctx.str(item.exposedPort, `${p}.exposedPort`),
       domain: ctx.str(item.domain, `${p}.domain`),
       healthcheck: parseHealthcheck(ctx, item.healthcheck, `${p}.healthcheck`),
+      resources: parseResources(ctx, item.resources, `${p}.resources`),
     });
   });
   return out;
@@ -385,12 +392,14 @@ export function parseOpenshipConfig(raw: unknown): ParseResult {
     framework: ctx.enumOf(raw.framework, "framework", STACK_IDS),
     packageManager: parsePackageManager(ctx, raw.packageManager, "packageManager"),
     rootDirectory: ctx.str(raw.rootDirectory, "rootDirectory"),
+    composePath: ctx.str(raw.composePath, "composePath"),
     installCommand: ctx.str(raw.installCommand, "installCommand"),
     buildCommand: ctx.str(raw.buildCommand, "buildCommand"),
     startCommand: ctx.str(raw.startCommand, "startCommand"),
     outputDirectory: ctx.str(raw.outputDirectory, "outputDirectory"),
     buildImage: ctx.str(raw.buildImage, "buildImage"),
     productionPaths: ctx.strArray(raw.productionPaths, "productionPaths"),
+    volumes: ctx.strArray(raw.volumes, "volumes"),
     runtime: ctx.enumOf(raw.runtime, "runtime", OPENSHIP_RUNTIMES),
     productionMode: ctx.enumOf(raw.productionMode, "productionMode", OPENSHIP_PRODUCTION_MODES),
     port: ctx.int(raw.port, "port", 1, 65535),

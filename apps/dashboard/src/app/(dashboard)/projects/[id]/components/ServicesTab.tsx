@@ -24,6 +24,8 @@ import {
 
 import { ServiceDetailPanel } from "./services/ServiceDetailPanel";
 import { AddServiceModal } from "./services/AddServiceModal";
+import { LinkedAppsCard } from "./services/LinkedAppsCard";
+import { ResourceSettings } from "./ResourceSettings";
 
 /** Render a drift diff value (arrays → csv, objects → keys, scalars → string). */
 const fmtDriftVal = (v: unknown): string => {
@@ -248,7 +250,7 @@ export const ServicesTab = () => {
   /* ── Empty state ───────────────────────────────────────────────── */
   if (services.length === 0) {
     return (
-      <>
+      <div className="space-y-5">
         <div className="bg-card rounded-2xl border border-border/50 px-6 pb-10 text-center">
           {/* SVG illustration - central app card linked to three service
               nodes (database, cache, queue). Uses the same `th-*` token
@@ -363,6 +365,10 @@ export const ServicesTab = () => {
             </button>
           </div>
         </div>
+        {/* A project can have a linked app before it has any service of its own
+            (wired at creation, not deployed yet) — don't hide the link behind
+            the empty state. */}
+        {hasProjectId && <LinkedAppsCard projectId={id} />}
         <AddServiceModal
           open={createOpen}
           projectName={projectSlugBase}
@@ -370,7 +376,7 @@ export const ServicesTab = () => {
           onClose={() => setCreateOpen(false)}
           onSubmit={handleCreateService}
         />
-      </>
+      </div>
     );
   }
 
@@ -626,6 +632,17 @@ export const ServicesTab = () => {
           );
         })}
       </div>
+
+      {/* Apps wired into this project — not services we own (no container, no
+          start/stop), but part of what it runs against. */}
+      <LinkedAppsCard projectId={id} />
+
+      {/* Project-wide cpu/memory caps. This lives here (not only in the Runtime
+          tab) because the Runtime tab is HIDDEN for a service-first project —
+          which is exactly the shape that had no way to change the limits its
+          containers ran with. A service can still override per-service via its
+          compose `mem_limit`. */}
+      <ResourceSettings />
 
       <AddServiceModal
         open={createOpen}

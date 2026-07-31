@@ -2,6 +2,12 @@
 
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import { Server, Cloud, Cpu, ArrowRight, Pencil, ChevronDown, ChevronUp, CheckCircle2, Loader2, Plus, Settings2, Zap, Globe, GitBranch, Search, ShieldAlert, ShieldCheck } from "lucide-react";
+import {
+  RESOURCE_TIER_ORDER,
+  RESOURCE_TIER_SPECS,
+  formatCpuCores,
+  formatMemoryMb,
+} from "@repo/core";
 import { BlurIp } from "@/components/BlurIp";
 import { useDeployment } from "@/context/DeploymentContext";
 import { usesServiceDeployment } from "@/context/deployment/types";
@@ -17,6 +23,7 @@ import type { DeployTarget, BuildStrategy, CloneStrategy, RuntimeMode } from "@/
 import { createPersistedValue } from "@/lib/persisted-value";
 import { AddServerModal } from "./AddServerModal";
 import ServerRuntimePicker from "./ServerRuntimePicker";
+import { RollbackBackupPanel } from "./RollbackBackupPanel";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 
 // ─── Option card ─────────────────────────────────────────────────────────────
@@ -515,9 +522,86 @@ export const lastPickStore = createPersistedValue<LastPick>(
   },
 );
 
+// ─── Silent target seeding (used on the config view) ─────────────────────────
+
+/**
+ * Resolve the deploy target and write it to config ONCE, as soon as the target
+ * list is ready — no UI. Priority mirrors the interactive step: explicit
+ * settings-API default > soft localStorage last-pick > a server (prefer the
+ * local host) > cloud.
+ *
+ * The config wizard calls this so it can land DIRECTLY on the config step with
+ * the right target already in the DeployTargetSummary bar, instead of mounting
+ * the full DeployTargetStep just to auto-pick a default and bounce back — that
+ * async "spin then advance" was the visible flash on entry. The summary bar is
+ * the affordance to change the pick (onEdit → the full step).
+ *
+ * `enabled` is false for existing projects: their saved target hydrates from
+ * initializeFromProject and must never be overwritten by the global default.
+ */
+export function useSeedDeployTarget(targets: ResolvedTargets, enabled: boolean): void {
+  const { updateConfig } = useDeployment();
+  const appliedRef = useRef(false);
+  useEffect(() => {
+    if (!enabled || !targets.ready || appliedRef.current) return;
+    let cancelled = false;
+    const seed = (
+      def?: { defaultDeployTarget?: DeployTarget | null; defaultServerId?: string | null } | null,
+    ) => {
+      if (cancelled || appliedRef.current) return;
+      appliedRef.current = true;
+      const target = def?.defaultDeployTarget ?? null;
+      const savedServerId = def?.defaultServerId ?? null;
+      // 1. Explicit settings-API default.
+      if (target === "server" && savedServerId && targets.servers.some((s) => s.id === savedServerId)) {
+        updateConfig({ deployTarget: "server", serverId: savedServerId });
+        return;
+      }
+      if (target === "cloud") {
+        updateConfig({ deployTarget: "cloud", serverId: undefined, buildStrategy: "server" });
+        return;
+      }
+      if (target === "local") {
+        updateConfig({ deployTarget: "local", serverId: undefined });
+        return;
+      }
+      // 2. Soft last-pick, validated against the current target list.
+      const last = lastPickStore.read();
+      if (last?.target === "server" && last.serverId && targets.servers.some((s) => s.id === last.serverId)) {
+        updateConfig({ deployTarget: "server", serverId: last.serverId });
+        return;
+      }
+      if (last?.target === "cloud") {
+        updateConfig({ deployTarget: "cloud", serverId: undefined, buildStrategy: "server" });
+        return;
+      }
+      if (last?.target === "local") {
+        updateConfig({ deployTarget: "local", serverId: undefined });
+        return;
+      }
+      // 3. A server exists → deploy to it (prefer the local host); else cloud.
+      if (targets.servers.length > 0) {
+        const preferred = targets.servers.find((s) => s.isLocal) ?? targets.servers[0];
+        updateConfig({ deployTarget: "server", serverId: preferred.id });
+        return;
+      }
+      updateConfig({ deployTarget: "cloud", serverId: undefined, buildStrategy: "server" });
+    };
+    settingsApi.get().then((res) => seed(res)).catch(() => seed(null));
+    return () => { cancelled = true; };
+    // One-shot seed keyed off readiness; tight dep array on purpose (matches the
+    // interactive step's seed effect below).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, targets.ready]);
+}
+
 // ─── Main step ───────────────────────────────────────────────────────────────
 
 interface DeployTargetStepProps {
+  /** Existing project this deploy edits, when there is one. Enables the rollback
+   *  + backup controls in the Advanced panel (there's nothing to persist to for a
+   *  project that hasn't been created yet). */
+  projectId?: string | null;
   targets: ResolvedTargets;
   onContinue: () => void;
   /**
@@ -530,27 +614,31 @@ interface DeployTargetStepProps {
 }
 
 // ─── Cloud resource tiers ────────────────────────────────────────────────────
-// Placeholder runtime shapes for the Openship Cloud power picker. The
-// numbers here are the UX surface only — the backend owns the
-// authoritative cpu/mem/disk values per tier and translates them at
-// provision time. Billing is credits-based (no $/mo shown here).
+// DERIVED from the one tier table in @repo/core, which the backend provisioner
+// (cloud-resources.ts) and the self-hosted Machine Power card also read. These
+// used to be hand-written display strings next to a comment admitting "the
+// backend owns the authoritative values" — i.e. a copy that could silently drift
+// from what a tier actually provisions. Label + bestFor are still looked up from
+// the dictionary by `id` inside CloudPowerPicker.
 type CloudResourceTier = NonNullable<DeploymentConfig["cloudResourceTier"]>;
 
-// Specs are technical values (kept verbatim); label + bestFor are looked up
-// from the dictionary by `id` inside CloudPowerPicker.
 const CLOUD_RESOURCE_TIERS: Array<{
     id: Exclude<CloudResourceTier, "custom">;
     cpu: string;
     ram: string;
     disk: string;
-}> = [
-    { id: "micro", cpu: "0.25 vCPU", ram: "256 MB", disk: "4 GB" },
-    { id: "low", cpu: "0.5 vCPU", ram: "512 MB", disk: "8 GB" },
-    { id: "medium", cpu: "1 vCPU", ram: "1 GB", disk: "16 GB" },
-    { id: "high", cpu: "2 vCPU", ram: "2 GB", disk: "32 GB" },
-];
+}> = RESOURCE_TIER_ORDER.map((id) => {
+    const spec = RESOURCE_TIER_SPECS[id];
+    return {
+        id: id as Exclude<CloudResourceTier, "custom">,
+        cpu: formatCpuCores(spec.cpuCores),
+        ram: formatMemoryMb(spec.memoryMb),
+        disk: formatMemoryMb(spec.diskMb),
+    };
+});
 
-const CUSTOM_DEFAULTS = { cpuCores: 1, memoryMb: 1024, diskMb: 16384 };
+/** Custom starts from the middle preset rather than a second literal. */
+const CUSTOM_DEFAULTS = { ...RESOURCE_TIER_SPECS.medium };
 
 // ─── Custom-values modal ─────────────────────────────────────────────────────
 // Rendered via showModal() so the inputs get proper breathing room
@@ -837,7 +925,7 @@ const CloudPowerPicker: React.FC = () => {
     );
 };
 
-const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue, autoSkipAllowed = true }) => {
+const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue, autoSkipAllowed = true, projectId }) => {
   const { config, updateConfig } = useDeployment();
   const { requireCloud } = useCloud();
   const { selfHosted, deployMode } = usePlatform();
@@ -947,6 +1035,16 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
   const appliedDefaultRef = useRef(false);
   useEffect(() => {
     if (!ready) return;
+    // Existing project: its saved target is authoritative (hydrated from
+    // initializeFromProject). Don't seed a default over it — just mark the
+    // fetch "done" so the picker renders the current config instead of a
+    // perpetual spinner. (The parent seeds NEW deploys via useSeedDeployTarget;
+    // this step now only mounts when the user opens the picker via the summary
+    // bar, so seeding here would fight the user's own reason for opening it.)
+    if (config.projectId) {
+      setDefaultsLoaded(true);
+      return;
+    }
 
     let cancelled = false;
     settingsApi.get()
@@ -1666,6 +1764,10 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
                       </div>
                     </div>
                   )}
+
+                  {/* Rollback window + backup summary for the chosen target. The
+                      same retention controls the project's Git settings show. */}
+                  <RollbackBackupPanel projectId={projectId} enabled={advancedOpen} />
 
                   {/* Clone location — docker/compose server deploys (sandboxed). */}
                   {showCloneStrategy && (

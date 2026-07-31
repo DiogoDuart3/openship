@@ -3,6 +3,78 @@
 All notable changes to Openship. Versions follow [semver](https://semver.org);
 the in-app updater surfaces critical advisories from `release-advisories.json`.
 
+## 0.4.9
+
+A round of fixes across the MCP integration and custom domains.
+
+### MCP
+- **Guided deploy flows** — the MCP server now ships a prompt catalog
+  (`deploy-from-git`, `deploy-a-folder`, `install-catalog-app`, and an
+  orientation overview) so an AI client follows the correct tool sequence
+  instead of reverse-engineering it from a flat list. Its write tools now carry
+  typed request bodies end to end (projects, deployments, domains, webhooks,
+  notifications, connections, apps), and every prompt points at
+  `github.com/oblien/openship/issues` when a client hits a platform bug.
+- **Scoped tokens list the right tools** — a token granted a single GitHub repo
+  (or the "create your own projects" scope) now correctly advertises the tools
+  it can actually call. Previously the per-repo GitHub tools and the project
+  create/list tools were filtered out of `tools/list`, so a scoped token saw
+  nothing to work with.
+
+### Custom domains
+- **The A record shows your server's IP** — on a self-hosted install the
+  pre-deploy DNS panel now fills the A record's value with the server's public
+  address (detected once when the server is registered) instead of leaving it
+  blank.
+- **Correct self-hosted DNS guidance** — the panel no longer tells you to add a
+  TXT record on a self-hosted box; there isn't one — HTTPS is issued
+  automatically on the first deploy. The DNS modal is also lighter and on-theme,
+  and the "Include www" switch now sits below the domain field so it no longer
+  shifts the input as you type.
+
+## 0.4.7
+
+The CLI self-hosting story is finalized, remote-Docker migrations are made
+reliable, and a batch of fixes lands across the control plane for a more stable
+release.
+
+### CLI
+- **A finished install opens the control panel, not the setup wizard** — bare
+  `openship` (and the from-source `openship-dev`) now recognizes a Docker Compose
+  install (the default on Linux). Re-running after setup manages the running
+  stack instead of walking you through name / email / domain from scratch again.
+- **Control-panel Start / Stop / Restart drive the actual stack** — on a compose
+  install these now run `docker compose up -d` / `restart` / `down` and read the
+  stack's real state, instead of targeting a systemd unit that was never
+  installed (which reported "stopped" for a healthy stack).
+
+### Migrations & remote Docker
+- **The SSH → Docker bridge no longer hangs or false-fails a healthy server** —
+  migrating from another platform (Coolify/Dokploy/Dokku) or adopting a running
+  Docker host could stall the reachability check — or drop the request outright —
+  under the Bun-hosted API, even against a perfectly healthy daemon. The bridge
+  now starts reading the request socket immediately and verifies each forwarded
+  channel actually carries data, falling back to `docker system dial-stdio` on a
+  fresh connection when a channel opens dead. Contributed by @jbermudez00 (#271).
+
+### Mail
+- **Mail-server setup works from the desktop app** — the iRedMail engine is now
+  shipped inside the packaged desktop app (and the CLI bundle) and located by an
+  explicit path, fixing the `Transfer iRedMail Engine … tar: could not chdir`
+  failure on install.
+
+### Fixes
+- **Self-hosted GitHub connect is token-first** — a remote (VPS) instance pastes
+  an access token inline in the Library, with no `gh auth login` hints; the gh
+  CLI path is now desktop-only, where it belongs.
+- **The deploy wizard lands on configuration directly** — the deploy-target
+  picker no longer flashes on entry. A sensible target is applied silently and
+  stays one click away in the summary bar at the top.
+- **The control plane stops listing a phantom service** — the self-managed
+  "Openship" project no longer shows a bogus public `openship` service (and its
+  stray `openship-openship.opsh.io` route) that matched no container and read
+  "Stopped" forever.
+
 ## 0.4.0
 
 A security fix for the edge, migrations that behave like a native repo project,

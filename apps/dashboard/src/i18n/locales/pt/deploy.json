@@ -40,7 +40,17 @@
     "verifySuffix": " para a verificação de propriedade.",
     "cloudInfoPre": "Adicione o ",
     "recordCname": "registro CNAME",
-    "cloudInfoMid": " para o roteamento e, em seguida, adicione o "
+    "cloudInfoMid": " para o roteamento e, em seguida, adicione o ",
+    "modalTitle": "Aponte o seu domínio e depois implante",
+    "modalSubtitle": "O HTTPS é emitido na primeira implantação assim que o seu domínio apontar para aqui — ou pule e adicione o DNS mais tarde na aba Domínios.",
+    "descCnameWww": "Aponta o www para o seu domínio principal",
+    "autoConfigTitle": "Configurar automaticamente com o meu provedor de DNS",
+    "autoConfigDesc": "Conecte o seu registrador e nós adicionaremos estes registros para você.",
+    "comingSoon": "Em breve",
+    "deployAction": "Implantar",
+    "cancel": "Cancelar",
+    "loadingRecords": "Carregando registros DNS…",
+    "serverIpPlaceholder": "o IP público do seu servidor"
   },
   "buildSummary": {
     "title": "Resumo da implantação",
@@ -185,7 +195,15 @@
       "apiHostServerDesc": "Clone no host do Openship e depois envie. Funciona em qualquer lugar.",
       "serverLabel": "No servidor",
       "serverDesc": "Clone no servidor — sem envio. Melhor para repositórios grandes."
-    }
+    },
+    "rollbackTitle": "Rollback e backups",
+    "rollbackHint": "Quantas versões anteriores continuam restauráveis neste servidor e o que é copiado antes de um deploy.",
+    "rollbackFirstDeploy": "Editável nas configurações do projeto após o primeiro deploy.",
+    "backupSummaryNone": "Sem política de backup ainda",
+    "backupSummaryConfigured": "{count} política(s) de backup · pré-deploy: {preDeploy}",
+    "backupManage": "Gerenciar backups",
+    "on": "ativo",
+    "off": "inativo"
   },
   "summary": {
     "buildAndDeploy": "Compilar e implantar:",
@@ -312,6 +330,8 @@
     "startCommandLabel": "Start command",
     "startCommandPlaceholder": "npx serve -s dist -l $PORT",
     "startCommandHint": "The command that starts your server. For a static bundle, use a static file server (e.g. npx serve).",
+    "modeStatic": "Estático",
+    "modeProcess": "Processo de servidor",
     "portLabel": "Port"
   }
 }

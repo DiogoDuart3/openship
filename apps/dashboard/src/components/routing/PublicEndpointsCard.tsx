@@ -3,9 +3,11 @@
 import React, { useState } from "react";
 import { ChevronDown, Globe, Plus, Trash2 } from "lucide-react";
 import { RoutingSettingsCard } from "@/components/routing/RoutingSettingsCard";
+import { Switch } from "@/components/ui/Switch";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import type { PublicEndpoint } from "@/context/deployment/types";
 import { createPublicEndpoint } from "@/context/deployment/types";
+import { useDefaultDomainType } from "@/context/CloudContext";
 
 interface PublicEndpointsCardProps {
   projectName: string;
@@ -28,6 +30,16 @@ interface PublicEndpointsCardProps {
    *  deploy/migrate flows keep ≥1 route; the project domains tab opts in so a user
    *  can delete their only/last domain and re-add one. */
   allowRemoveAll?: boolean;
+  /** Optional "Include www." switch shown as the first row of the domain card,
+   *  for the apex custom domain. `apex` is the bare apex (null until one is typed);
+   *  `show` hides it for subdomains (where `www.<sub>` is nonsensical). Only the
+   *  primary/apex input gets the `www.` auto-strip — never the `www.<apex>` row. */
+  wwwToggle?: {
+    show: boolean;
+    included: boolean;
+    apex: string | null;
+    onToggle: (on: boolean) => void;
+  };
 }
 
 const PublicEndpointsCard: React.FC<PublicEndpointsCardProps> = ({
@@ -42,10 +54,12 @@ const PublicEndpointsCard: React.FC<PublicEndpointsCardProps> = ({
   portInline = false,
   hideTypeToggle = false,
   allowRemoveAll = false,
+  wwwToggle,
 }) => {
   const { t } = useI18n();
   const w = t.widgets.routing.publicEndpoints;
   const hasMultipleEndpoints = endpoints.length > 1;
+  const newEndpointDomainType = useDefaultDomainType();
 
   // With multiple domains, collapse each into a compact row so the list isn't
   // a huge stack of full forms — click a row to expand its editor. A single
@@ -107,9 +121,11 @@ const PublicEndpointsCard: React.FC<PublicEndpointsCardProps> = ({
         hasServer
           ? {
               port: lastEndpoint?.port || runtimePort || "",
+              domainType: newEndpointDomainType,
             }
           : {
               targetPath: lastEndpoint?.targetPath || "/",
+              domainType: newEndpointDomainType,
             },
       )),
     ]);
@@ -151,12 +167,21 @@ const PublicEndpointsCard: React.FC<PublicEndpointsCardProps> = ({
         }
       : undefined;
 
+    // Auto-strip `www.` on the primary/apex custom input only — NOT the
+    // `www.<apex>` variant endpoint (stripping it would collapse it into the apex).
+    const isWwwVariant =
+      !!wwwToggle?.apex &&
+      endpoint.domainType === "custom" &&
+      endpoint.customDomain.trim().toLowerCase() === `www.${wwwToggle.apex}`;
+    const stripWww = !!wwwToggle && endpoint.domainType === "custom" && !isWwwVariant;
+
     return (
       <RoutingSettingsCard
         projectName={projectName}
         domain={endpoint.domain}
         customDomain={endpoint.customDomain}
         domainType={endpoint.domainType}
+        stripWww={stripWww}
         targetMode={hasServer ? "proxy" : "static"}
         targetPath={hasServer ? undefined : endpoint.targetPath}
         exposedPort={hasServer ? endpoint.port : undefined}
@@ -365,6 +390,21 @@ const PublicEndpointsCard: React.FC<PublicEndpointsCardProps> = ({
         }) : renderRoutingCard(
           endpoints[0],
           allowRemoveAll ? removeButton(endpoints[0].id) : undefined,
+        )}
+
+        {/* Single compact row, kept UNDER the domain input so toggling it (or its
+            appearance once a domain is typed) never shifts the input above. */}
+        {wwwToggle?.show && (
+          <div className="flex items-center justify-between gap-4 rounded-xl bg-muted/30 px-4 py-3">
+            <span className="text-[13px] font-medium text-foreground">
+              {t.projectSettings.domains.add.includeWww}
+            </span>
+            <Switch
+              checked={wwwToggle.included}
+              onChange={(next) => wwwToggle.onToggle(next)}
+              ariaLabel={t.projectSettings.domains.add.includeWww}
+            />
+          </div>
         )}
       </div>
     </div>

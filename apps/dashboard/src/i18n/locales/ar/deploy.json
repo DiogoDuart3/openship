@@ -40,7 +40,17 @@
     "verifySuffix": " للتحقق من الملكية.",
     "cloudInfoPre": "أضف ",
     "recordCname": "سجل CNAME",
-    "cloudInfoMid": " للتوجيه، ثم أضف "
+    "cloudInfoMid": " للتوجيه، ثم أضف ",
+    "modalTitle": "وجّه نطاقك، ثم انشر",
+    "modalSubtitle": "يُصدر HTTPS عند أول عملية نشر بعد أن يشير نطاقك إلى هنا — أو تجاوز الخطوة وأضف DNS لاحقًا من تبويب النطاقات.",
+    "descCnameWww": "يوجّه www إلى نطاقك الرئيسي",
+    "autoConfigTitle": "الإعداد التلقائي عبر مزوّد DNS الخاص بي",
+    "autoConfigDesc": "اربط مُسجّل النطاق وسنضيف هذه السجلات نيابةً عنك.",
+    "comingSoon": "قريبًا",
+    "deployAction": "نشر",
+    "cancel": "إلغاء",
+    "loadingRecords": "جارٍ تحميل سجلات DNS…",
+    "serverIpPlaceholder": "عنوان IP العام لخادمك"
   },
   "buildSummary": {
     "title": "ملخص النشر",
@@ -185,7 +195,15 @@
       "apiHostServerDesc": "استنسخ على مضيف Openship، ثم ارفع سياق البناء. يعمل في كل مكان.",
       "serverLabel": "على الخادم",
       "serverDesc": "استنسخ مباشرة على الخادم — دون رفع، الأفضل للمستودعات الكبيرة."
-    }
+    },
+    "rollbackTitle": "التراجع والنسخ الاحتياطي",
+    "rollbackHint": "عدد النسخ السابقة التي تبقى قابلة للاستعادة على هذا الخادم، وما يُنسخ احتياطيًا قبل النشر.",
+    "rollbackFirstDeploy": "قابل للتعديل في إعدادات المشروع بعد أول عملية نشر.",
+    "backupSummaryNone": "لا توجد سياسة نسخ احتياطي بعد",
+    "backupSummaryConfigured": "{count} سياسة نسخ احتياطي · قبل النشر: {preDeploy}",
+    "backupManage": "إدارة النسخ الاحتياطي",
+    "on": "مفعّل",
+    "off": "معطّل"
   },
   "summary": {
     "buildAndDeploy": "البناء والنشر:",
@@ -312,8 +330,8 @@
     "startCommandLabel": "Start command",
     "startCommandPlaceholder": "npm start",
     "startCommandHint": "Leave empty to serve the build output as static files from the edge (nothing runs). Enter a command to run it as a live server process.",
-    "modeStatic": "Static",
-    "modeProcess": "Server process",
+    "modeStatic": "ثابت",
+    "modeProcess": "عملية خادم",
     "portLabel": "Port"
   }
 }

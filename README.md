@@ -35,6 +35,7 @@
   <a href="docs/i18n/README.pt.md"><img src="https://img.shields.io/badge/lang-Português-555" alt="Português" /></a>
   <a href="docs/i18n/README.de.md"><img src="https://img.shields.io/badge/lang-Deutsch-555" alt="Deutsch" /></a>
   <a href="docs/i18n/README.tr.md"><img src="https://img.shields.io/badge/lang-Türkçe-555" alt="Türkçe" /></a>
+  <a href="docs/i18n/README.ko.md"><img src="https://img.shields.io/badge/lang-한국어-555" alt="한국어" /></a>
 </p>
 
 <p align="center">
@@ -97,7 +98,8 @@ A self-hosted instance **always requires login** (the admin you create in setup)
 > **Preview an unreleased build (dev).** To run the CLI built straight from source — a branch, tag, or `main` ahead of the next release — install the from-source build:
 >
 > ```bash
-> curl -fsSL https://get.openship.io/dev | sh     # or: OPENSHIP_REF=my-branch curl ... | sh
+> curl -fsSL https://get.openship.io/dev | sh                  # main (default)
+> curl -fsSL https://get.openship.io/dev | OPENSHIP_REF=dev sh  # a branch/tag (var goes on sh, not curl)
 > openship-dev                                     # same CLI, built from source
 > openship-dev update                              # pull latest source + rebuild (no release needed)
 > ```

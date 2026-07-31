@@ -17,7 +17,13 @@
   },
   "domainSettings": {
     "saveFailed": "Alan adları kaydedilemedi",
-    "toastTitle": "Alan Adları"
+    "toastTitle": "Alan Adları",
+    "routeFreeLabel": "Ücretsiz alt alan adı",
+    "routeFreeDesc": "Anında hazır, ücretsiz bir {domain} adresi.",
+    "routeCustomLabel": "Özel alan adı",
+    "routeCustomDesc": "Kendi alan adınızı bu dağıtıma yönlendirin.",
+    "routeNoneLabel": "Yok",
+    "routeNoneDesc": "Herkese açık adres yok — yalnızca dahili. Host üzerindeki port ile erişin."
   },
   "dns": {
     "title": "DNS Yapılandırması",
@@ -34,7 +40,17 @@
     "verifySuffix": " sahiplik doğrulaması için ekleyin.",
     "cloudInfoPre": "Yönlendirme için ",
     "recordCname": "CNAME kaydını",
-    "cloudInfoMid": " ekleyin, ardından "
+    "cloudInfoMid": " ekleyin, ardından ",
+    "modalTitle": "Alan adınızı yönlendirin, sonra dağıtın",
+    "modalSubtitle": "Alan adınız buraya yönlendiğinde HTTPS ilk dağıtımda verilir — ya da atlayıp DNS’i daha sonra Alan Adları sekmesinden ekleyin.",
+    "descCnameWww": "www’yi ana alan adınıza yönlendirir",
+    "autoConfigTitle": "DNS sağlayıcım ile otomatik yapılandır",
+    "autoConfigDesc": "Kayıt operatörünüzü bağlayın, bu kayıtları sizin için ekleyelim.",
+    "comingSoon": "Yakında",
+    "deployAction": "Dağıt",
+    "cancel": "İptal",
+    "loadingRecords": "DNS kayıtları yükleniyor…",
+    "serverIpPlaceholder": "sunucunuzun genel IP adresi"
   },
   "buildSummary": {
     "title": "Dağıtım Özeti",
@@ -119,6 +135,8 @@
     "addServer": "Kendi sunucunuzu ekleyin",
     "continue": "Devam et",
     "chooseServer": "Bir sunucu seçin",
+    "thisServerBadge": "Bu Sunucu",
+    "thisServerHost": "Mevcut ana makine — dağıtımlar burada çalışır",
     "searchPlaceholder": "Sunucularda ara…",
     "noServersMatch": "Aramanızla eşleşen sunucu bulunamadı.",
     "requireCloudFeature": "Openship Bulut'a Dağıtılıyor",
@@ -177,7 +195,15 @@
       "apiHostServerDesc": "Openship üzerinde klonlayın, ardından yükleyin.",
       "serverLabel": "Sunucuda",
       "serverDesc": "Sunucuda klonlayın. Yükleme yok."
-    }
+    },
+    "rollbackTitle": "Geri alma ve yedekler",
+    "rollbackHint": "Bu sunucuda kaç eski sürümün geri yüklenebilir kaldığı ve dağıtımdan önce neyin yedeklendiği.",
+    "rollbackFirstDeploy": "İlk dağıtımdan sonra proje ayarlarından düzenlenebilir.",
+    "backupSummaryNone": "Henüz yedek kuralı yok",
+    "backupSummaryConfigured": "{count} yedek kuralı · dağıtım öncesi: {preDeploy}",
+    "backupManage": "Yedekleri yönet",
+    "on": "açık",
+    "off": "kapalı"
   },
   "summary": {
     "buildAndDeploy": "Derle ve Dağıt:",
@@ -304,8 +330,8 @@
     "startCommandLabel": "Start command",
     "startCommandPlaceholder": "npm start",
     "startCommandHint": "Leave empty to serve the build output as static files from the edge (nothing runs). Enter a command to run it as a live server process.",
-    "modeStatic": "Static",
-    "modeProcess": "Server process",
+    "modeStatic": "Statik",
+    "modeProcess": "Sunucu süreci",
     "portLabel": "Port"
   }
 }

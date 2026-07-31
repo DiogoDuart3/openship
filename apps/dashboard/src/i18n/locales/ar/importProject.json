@@ -47,6 +47,16 @@
     "outputDirectoryDesc": "الدليل الذي يحتوي على مخرجات البناء",
     "sourceFolderLabel": "مجلد المصدر",
     "sourceFolderDesc": "البناء من دليل فرعي داخل المستودع أو المشروع المحلي.",
+    "composePath": {
+      "title": "ملف Compose",
+      "subtitle": "يُكتشف تلقائيًا في جذر المشروع",
+      "label": "مسار ملف Compose",
+      "description": "للمستودعات التي تحفظ ملف compose خارج الجذر — أدخل الملف (deploy/stack.yml) أو المجلد الذي يحتويه (deploy/docker-compose). يعيد فحص المستودع وينشر الخدمات المعرّفة فيه.",
+      "apply": "فحص",
+      "scanning": "جارٍ الفحص…",
+      "scanFailed": "تعذّر فحص مسار Compose هذا.",
+      "subtitleOptIn": "هل تنشر باستخدام Docker Compose؟ حدد الملف."
+    },
     "buildImageLabel": "صورة البناء",
     "buildImageDesc": "صورة حاوية البناء للبناء السحابي أو على الخادم. تجاوزها عندما تكون الصورة الأساسية المكتشفة خاطئة.",
     "productionPathsLabel": "مسارات الإنتاج",
@@ -123,6 +133,11 @@
       "clipboardEmpty": "الحافظة فارغة",
       "clipboardInvalid": "لا تحتوي الحافظة على متغيرات بيئة صالحة بصيغة KEY=VALUE",
       "clipboardBlocked": "تم حظر الوصول إلى الحافظة. انقر داخل مربع البيئة والصق باستخدام Cmd/Ctrl+V."
+    },
+    "reveal": {
+      "show": "إظهار القيم",
+      "hide": "إخفاء القيم",
+      "error": "تعذر إظهار القيم"
     }
   },
   "composeServices": {

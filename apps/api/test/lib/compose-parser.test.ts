@@ -413,7 +413,7 @@ services:
     expect(parsed.services[0]?.restart).toBe("unless-stopped");
   });
 
-  it("extracts the command override", () => {
+  it("extracts a string command as display text AND structured argv (#332)", () => {
     const parsed = parseComposeFile(`
 services:
   worker:
@@ -421,6 +421,89 @@ services:
     command: node worker.js --concurrency 4
 `);
     expect(parsed.services[0]?.command).toBe("node worker.js --concurrency 4");
+    // #332: string is shell-word-split to argv (no implicit sh -c).
+    expect(parsed.services[0]?.commandArgv).toEqual(["node", "worker.js", "--concurrency", "4"]);
+  });
+
+  it("keeps a LIST command as argv verbatim — not flattened (#332)", () => {
+    const parsed = parseComposeFile(`
+services:
+  app:
+    image: ghcr.io/acme/app:1
+    command: ["serve", "--host", "0.0.0.0"]
+`);
+    // display join for the text column…
+    expect(parsed.services[0]?.command).toBe("serve --host 0.0.0.0");
+    // …but the structured argv is verbatim, which is what the runtime uses.
+    expect(parsed.services[0]?.commandArgv).toEqual(["serve", "--host", "0.0.0.0"]);
+  });
+
+  it("preserves an explicit shell command as argv (#332)", () => {
+    const parsed = parseComposeFile(`
+services:
+  app:
+    image: node:22
+    command: sh -c "node server.js && tail -f /dev/null"
+`);
+    expect(parsed.services[0]?.commandArgv).toEqual([
+      "sh",
+      "-c",
+      "node server.js && tail -f /dev/null",
+    ]);
+  });
+
+  it("no command → no commandArgv (image CMD preserved) (#332)", () => {
+    const parsed = parseComposeFile(`
+services:
+  app:
+    image: node:22
+`);
+    expect(parsed.services[0]?.command).toBeUndefined();
+    expect(parsed.services[0]?.commandArgv == null).toBe(true);
+  });
+
+  it("interpolates ${VAR} BEFORE splitting a string command into argv (#332)", () => {
+    const parsed = parseComposeFile(
+      `
+services:
+  app:
+    image: node:22
+    command: node app.js --token \${API_TOKEN} --port \${PORT:-3000}
+`,
+      { envFileContent: "API_TOKEN=abc123\n" },
+    );
+    // interpolation resolves first, THEN shell-split → argv (no sh -c).
+    expect(parsed.services[0]?.commandArgv).toEqual(["node", "app.js", "--token", "abc123", "--port", "3000"]);
+  });
+
+  it("empty list command → [] (clears image CMD) (#332)", () => {
+    const parsed = parseComposeFile(`
+services:
+  app:
+    image: redis:7
+    command: []
+`);
+    expect(parsed.services[0]?.commandArgv).toEqual([]);
+  });
+
+  it("empty string command → [] (clears image CMD) (#332)", () => {
+    const parsed = parseComposeFile(`
+services:
+  app:
+    image: redis:7
+    command: ""
+`);
+    expect(parsed.services[0]?.commandArgv).toEqual([]);
+  });
+
+  it("a list arg with spaces is preserved as ONE argv element (#332)", () => {
+    const parsed = parseComposeFile(`
+services:
+  app:
+    image: node:22
+    command: ["node", "-e", "console.log('a b')"]
+`);
+    expect(parsed.services[0]?.commandArgv).toEqual(["node", "-e", "console.log('a b')"]);
   });
 
   it("extracts volumes list", () => {
@@ -492,5 +575,146 @@ services:
   it("returns an empty services array when 'services' key is missing", () => {
     const parsed = parseComposeFile(`version: "3.9"\nnetworks:\n  default:\n`);
     expect(parsed.services).toEqual([]);
+  });
+
+  it("resolves `<<` merge keys so an anchored environment block reaches the service", () => {
+    const parsed = parseComposeFile(`
+x-environment: &shared
+  DB_HOST: postgres
+  RAILS_ENV: production
+  SETTINGS__APP_COMPONENT: base
+
+services:
+  web:
+    image: app:latest
+    environment:
+      <<: *shared
+      SETTINGS__APP_COMPONENT: web
+`);
+    // The yaml package parses as YAML 1.2, where `<<` is an ordinary key unless
+    // merge support is enabled. Left off, every anchored var is dropped and the
+    // unresolved anchor lands as a literal "<<" var stringified to
+    // "[object Object]" - which deploy.service.ts then spreads into the
+    // container environment. An explicit key still wins over the merged one.
+    expect(parsed.services[0]?.environment).toEqual({
+      DB_HOST: "postgres",
+      RAILS_ENV: "production",
+      SETTINGS__APP_COMPONENT: "web",
+    });
+  });
+});
+
+describe("parseComposeFile - mandatory variable operators (:? and ?)", () => {
+  // Compose treats these as a hard stop, and the thrown message is the author's
+  // own word after the operator. Getting this wrong means a deploy silently
+  // proceeds with an empty image tag / port instead of telling the user which
+  // variable they forgot.
+  const compose = (expr: string) => `
+services:
+  app:
+    image: node:\${${expr}}
+`;
+
+  it(":? throws when the variable is unset", () => {
+    expect(() => parseComposeFile(compose("NODE_VERSION:?NODE_VERSION is required"))).toThrow(
+      "NODE_VERSION is required",
+    );
+  });
+
+  it(":? throws when the variable is set but empty", () => {
+    expect(() =>
+      parseComposeFile(compose("NODE_VERSION:?NODE_VERSION is required"), {
+        envFileContent: "NODE_VERSION=\n",
+      }),
+    ).toThrow("NODE_VERSION is required");
+  });
+
+  it(":? passes the value through when non-empty", () => {
+    const parsed = parseComposeFile(compose("NODE_VERSION:?NODE_VERSION is required"), {
+      envFileContent: "NODE_VERSION=22\n",
+    });
+    expect(parsed.services[0]?.image).toBe("node:22");
+  });
+
+  it("? throws only when the variable is unset", () => {
+    expect(() => parseComposeFile(compose("NODE_VERSION?NODE_VERSION is required"))).toThrow(
+      "NODE_VERSION is required",
+    );
+  });
+
+  it("? accepts an explicitly empty value (set-but-empty is not an error)", () => {
+    const parsed = parseComposeFile(compose("NODE_VERSION?NODE_VERSION is required"), {
+      envFileContent: "NODE_VERSION=\n",
+    });
+    expect(parsed.services[0]?.image).toBe("node:");
+  });
+
+  it("reports the author's message verbatim, punctuation and all", () => {
+    expect(() => parseComposeFile(compose("DB_URL:?DB_URL must be set (see README)"))).toThrow(
+      "DB_URL must be set (see README)",
+    );
+  });
+});
+
+// #333: an uploaded compose file's own limits were parsed nowhere and silently
+// dropped — a service asking for 4 GB got whatever the project was set to.
+describe("parseComposeFile — service resource limits", () => {
+  const svc = (body: string) => `services:\n  api:\n    image: nginx\n${body}`;
+
+  it("parses the short form (mem_limit + cpus)", () => {
+    const parsed = parseComposeFile(svc("    mem_limit: 4g\n    cpus: 2.5\n"));
+    expect(parsed.services[0]?.advanced?.resources).toEqual({ cpuCores: 2.5, memoryMb: 4096 });
+  });
+
+  it("parses the swarm form (deploy.resources.limits)", () => {
+    const parsed = parseComposeFile(
+      svc("    deploy:\n      resources:\n        limits:\n          memory: 3072M\n          cpus: '1.5'\n"),
+    );
+    expect(parsed.services[0]?.advanced?.resources).toEqual({ cpuCores: 1.5, memoryMb: 3072 });
+  });
+
+  it("lets the more specific deploy block win over the short form", () => {
+    const parsed = parseComposeFile(
+      svc("    mem_limit: 512m\n    deploy:\n      resources:\n        limits:\n          memory: 8g\n"),
+    );
+    expect(parsed.services[0]?.advanced?.resources?.memoryMb).toBe(8192);
+  });
+
+  it("accepts every byte-suffix spelling compose allows", () => {
+    const mem = (v: string) =>
+      parseComposeFile(svc(`    mem_limit: ${v}\n`)).services[0]?.advanced?.resources?.memoryMb;
+    expect(mem("512m")).toBe(512);
+    expect(mem("512mb")).toBe(512);
+    expect(mem("2g")).toBe(2048);
+    expect(mem("2GB")).toBe(2048);
+    expect(mem("1048576k")).toBe(1024);
+    expect(mem("1073741824")).toBe(1024); // bare number = bytes
+  });
+
+  it("interpolates a limit from the env file", () => {
+    const parsed = parseComposeFile(svc("    mem_limit: ${API_MEM}\n"), {
+      envFileContent: "API_MEM=6g\n",
+    });
+    expect(parsed.services[0]?.advanced?.resources?.memoryMb).toBe(6144);
+  });
+
+  it("omits resources entirely when the service declares none", () => {
+    const parsed = parseComposeFile(svc("    ports:\n      - '80:80'\n"));
+    expect(parsed.services[0]?.advanced?.resources).toBeUndefined();
+  });
+
+  // A malformed limit must not silently become a tiny cap — that's the failure
+  // mode this whole change exists to remove.
+  it("drops an unparseable limit rather than guessing a small one", () => {
+    const parsed = parseComposeFile(svc("    mem_limit: lots\n    cpus: many\n"));
+    expect(parsed.services[0]?.advanced?.resources).toBeUndefined();
+  });
+
+  it("keeps a healthcheck and resources side by side in one advanced blob", () => {
+    const parsed = parseComposeFile(
+      svc("    mem_limit: 1g\n    healthcheck:\n      test: 'curl -f localhost'\n"),
+    );
+    expect(parsed.services[0]?.advanced?.resources?.memoryMb).toBe(1024);
+    expect(parsed.services[0]?.advanced?.healthcheck?.test).toBe("curl -f localhost");
   });
 });

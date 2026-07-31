@@ -187,6 +187,14 @@ export function MailAdminPanel({ status, serverId, onRefresh, onForgotten }: Mai
             onSelectDomain={(d) => setQuery({ domain: d })}
           />
         )}
+        {tab === "aliases" && (
+          <AliasesTab
+            serverId={serverId}
+            primaryDomain={primaryDomain}
+            selectedDomain={selectedDomain}
+            onSelectDomain={(d) => setQuery({ domain: d })}
+          />
+        )}
         {tab === "dns" && (
           <DnsTab
             status={status}

@@ -33,14 +33,24 @@
     "descTxt": "Verifies domain ownership",
     "nameHost": "Name / Host",
     "valueTarget": "Value / Target",
-    "selfInfoPre": "Add the ",
+    "selfInfoPre": "Point the ",
     "recordA": "A record",
-    "selfInfoMid": " pointing to your server IP, then add the ",
+    "selfInfoMid": " at your server's IP — HTTPS is issued automatically on the first deploy.",
     "recordTxt": "TXT record",
     "verifySuffix": " for ownership verification.",
     "cloudInfoPre": "Add the ",
     "recordCname": "CNAME record",
-    "cloudInfoMid": " for routing, then add the "
+    "cloudInfoMid": " for routing, then add the ",
+    "modalTitle": "Point your domain, then deploy",
+    "modalSubtitle": "HTTPS is issued on the first deploy once your domain points here — or skip and add DNS later from the Domains tab.",
+    "descCnameWww": "Points www to your apex domain",
+    "autoConfigTitle": "Auto-configure with my DNS provider",
+    "autoConfigDesc": "Connect your registrar and we'll add these records for you.",
+    "comingSoon": "Coming soon",
+    "deployAction": "Deploy",
+    "cancel": "Cancel",
+    "loadingRecords": "Loading DNS records…",
+    "serverIpPlaceholder": "your server’s public IP"
   },
   "buildSummary": {
     "title": "Deploy Summary",
@@ -185,7 +195,15 @@
       "apiHostServerDesc": "Clone on Openship, then upload.",
       "serverLabel": "On the server",
       "serverDesc": "Clone on the server. No upload."
-    }
+    },
+    "rollbackTitle": "Rollback & backups",
+    "rollbackHint": "How many past versions stay restorable on this server, and what gets backed up before a deploy.",
+    "rollbackFirstDeploy": "Editable in the project's settings once this project has deployed once.",
+    "backupSummaryNone": "No backup policy yet",
+    "backupSummaryConfigured": "{count} backup policy(ies) · pre-deploy: {preDeploy}",
+    "backupManage": "Manage backups",
+    "on": "on",
+    "off": "off"
   },
   "summary": {
     "buildAndDeploy": "Build & deploy:",

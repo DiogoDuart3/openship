@@ -47,6 +47,16 @@
     "outputDirectoryDesc": "ビルド出力を格納するディレクトリ",
     "sourceFolderLabel": "ソースフォルダ",
     "sourceFolderDesc": "リポジトリまたはローカルプロジェクト内のサブディレクトリからビルドします。",
+    "composePath": {
+      "title": "Compose ファイル",
+      "subtitle": "プロジェクトのルートで自動検出",
+      "label": "Compose ファイルのパス",
+      "description": "compose をルート以外に置いているリポジトリ向け — ファイル（deploy/stack.yml）またはそれを含むフォルダ（deploy/docker-compose）を指定します。リポジトリを再スキャンし、宣言されたサービスをデプロイします。",
+      "apply": "スキャン",
+      "scanning": "スキャン中…",
+      "scanFailed": "その Compose パスをスキャンできませんでした。",
+      "subtitleOptIn": "Docker Compose でデプロイしますか？ファイルを指定してください。"
+    },
     "buildImageLabel": "ビルドイメージ",
     "buildImageDesc": "クラウドまたはサーバービルド用のビルダーコンテナイメージ。検出されたベースイメージが正しくない場合は上書きしてください。",
     "productionPathsLabel": "本番パス",
@@ -122,6 +132,11 @@
       "clipboardEmpty": "クリップボードが空です",
       "clipboardInvalid": "クリップボードに有効な KEY=VALUE 形式の環境変数が含まれていません",
       "clipboardBlocked": "クリップボードへのアクセスがブロックされました。環境ボックス内をクリックし、Cmd/Ctrl+V で貼り付けてください。"
+    },
+    "reveal": {
+      "show": "値を表示",
+      "hide": "値を非表示",
+      "error": "値を表示できませんでした"
     }
   },
   "composeServices": {

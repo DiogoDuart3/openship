@@ -1,6 +1,6 @@
 import type { Project } from "@repo/db";
 import type { ManualCert, SslProvider, SslResult } from "@repo/adapters";
-import { ForbiddenError, NotFoundError, SYSTEM } from "@repo/core";
+import { ForbiddenError, NotFoundError, wwwSiblingHostname, SYSTEM } from "@repo/core";
 import { repos } from "@repo/db";
 import { env } from "../config/env";
 import { platform } from "./controller-helpers";
@@ -16,7 +16,7 @@ import { resolveDeploymentPlatform, type DeploymentMeta } from "./deployment-run
  * budget. In-process mutex (single-process self-hosted) layered over a Postgres
  * advisory lock (multi-instance SaaS); see provision-lock.ts.
  */
-function sslIssueLockKey(hostname: string): string {
+export function sslIssueLockKey(hostname: string): string {
   return `ssl:issue:${hostname.trim().toLowerCase()}`;
 }
 
@@ -34,6 +34,56 @@ function certComfortablyValid(result: SslResult): boolean {
 }
 
 export type DomainSslAction = "provision" | "renew" | "verify";
+
+/** Why a domain's TLS is not certbot's job on the serving box. */
+export type TlsIssuedElsewhere = "external_ingress" | "manual_cert" | "managed_edge";
+
+/**
+ * Is TLS for this domain issued/terminated somewhere OTHER than certbot on the box
+ * that serves it? Returns the reason, or null when we really do issue it here.
+ *
+ * THE one place this question is answered. It used to be answered five times, in
+ * five vocabularies, by whoever happened to be calling: `skipSsl` in the routing
+ * planner, `external` in the route planner and in `verifyDomain`, a `skipCert`
+ * boolean threaded through the self-app edge provisioner, and an inline
+ * `domainType !== "free"` in the boot reconcile. Each new cert caller had to
+ * rediscover it, and the one that forgot burned a Let's Encrypt attempt on a
+ * hostname whose A record points at someone else's edge.
+ *
+ *   externalIngress → TLS terminates at the operator's own proxy/CDN; ACME can't
+ *                     run here (origin :80 may be firewalled to CDN IPs).
+ *   manualSsl       → operator-uploaded cert (BYO / Cloudflare Origin CA). certbot
+ *                     never issued it, so `renew` would error and flip it to
+ *                     "error".
+ *   free            → a managed `*.opsh.io` host: Openship Cloud's edge terminates
+ *                     TLS and forwards to plain :80 here. The box usually has no
+ *                     public A record for the name at all, so HTTP-01 cannot pass.
+ */
+export function tlsIssuedElsewhere(domain: {
+  domainType?: string | null;
+  externalIngress?: boolean | null;
+  manualSsl?: boolean | null;
+}): TlsIssuedElsewhere | null {
+  if (domain.externalIngress) return "external_ingress";
+  if (domain.manualSsl) return "manual_cert";
+  if (domain.domainType === "free") return "managed_edge";
+  return null;
+}
+
+/** Operator-facing one-liner for {@link tlsIssuedElsewhere}. */
+export function describeTlsIssuedElsewhere(
+  where: TlsIssuedElsewhere,
+  hostname: string,
+): string {
+  switch (where) {
+    case "external_ingress":
+      return `TLS for ${hostname} terminates at your own ingress — no certificate is issued here.`;
+    case "manual_cert":
+      return `${hostname} serves an uploaded certificate — certbot is not run for it.`;
+    default:
+      return `TLS for ${hostname} is handled by Openship Cloud — no local certificate needed.`;
+  }
+}
 
 interface DomainSslOptions {
   action: DomainSslAction;
@@ -77,12 +127,16 @@ async function resolveAuthorizedDomain(hostname: string, opts: DomainSslOptions)
  *   - verified cert read     → "active" (+ expiry, issuer)
  *   - transient read failure → null (a redeploy that briefly can't read the cert
  *                              must NOT downgrade a live "active" to "provisioning")
+ *   - no cert BY DESIGN      → null (TLS is issued elsewhere; "provisioning" would
+ *                              overwrite a correct "external" and make the UI show
+ *                              a cert lifecycle nobody is driving)
  *   - cert genuinely missing → "provisioning" (still being issued)
  */
 export function resolveSslPatch(
   currentStatus: string | null | undefined,
   result: SslResult,
 ): { sslStatus: string; sslIssuer?: string; sslExpiresAt?: Date } | null {
+  if (result.reason === "not_local") return null;
   if (result.verified && result.expiresAt) {
     return {
       sslStatus: "active",
@@ -94,6 +148,17 @@ export function resolveSslPatch(
     return null;
   }
   return { sslStatus: "provisioning", sslIssuer: result.issuer };
+}
+
+/**
+ * The result for "we didn't issue anything, and that's correct".
+ *
+ * `verified: true` because from the caller's point of view TLS for this hostname is
+ * handled — the wizard should show success, not a failure it can't act on. No
+ * `expiresAt`, because we don't own that cert's lifecycle and must not claim to.
+ */
+function notLocalResult(hostname: string): SslResult {
+  return { domain: hostname, expiresAt: "", issuer: "", verified: true, reason: "not_local" };
 }
 
 async function persistSslResult(
@@ -179,18 +244,31 @@ async function executeSslAction(
 
 // NOTE on the toolchain (certbot/OpenResty): we deliberately do NOT install it
 // here. Installing certbot can take 30–90s, which blows the renew HTTP request's
-// timeout. Toolchain install lives in the DEPLOY step chain instead — the deploy
-// preflight runs `system.ensureFeature("ssl", …)` whenever a planned domain has
-// `provisionSsl` (see build-pipeline.ts), streaming the install logs into the
-// deploy output. So a custom domain gets certbot installed AND its cert issued
-// as part of a normal deploy; this on-demand path only issues/renews against an
-// already-provisioned host (and surfaces a clear error if the toolchain is
-// missing — i.e. "redeploy to set up SSL").
+// timeout. Toolchain install lives in the DEPLOY step chain instead. The first
+// deploy prepares it for every local-certbot custom route, including a pending
+// one whose certificate issuance is deferred until verification. This
+// on-demand path can therefore issue/renew later without requiring a redeploy.
 export async function manageDomainSsl(
   hostname: string,
   opts: DomainSslOptions,
 ): Promise<SslResult> {
   const { domainRecord, project } = await resolveAuthorizedDomain(hostname, opts);
+
+  // THE gate, and it lives here rather than in each caller: this is the single
+  // entrypoint that can open an ACME order (manual Provision/Verify, the ssl:renew
+  // scheduler, the self-app edge provisioner, the boot reconcile), and it used to
+  // run certbot for whatever hostname it was handed. Every caller was expected to
+  // know not to ask — so the gate belongs where the row is already loaded.
+  //
+  // `verify` is exempt: it's a read-only inspection of whatever cert is on disk,
+  // which is exactly what you want for an uploaded one.
+  const elsewhere = opts.action === "verify" ? null : tlsIssuedElsewhere(domainRecord);
+  if (elsewhere) {
+    // Deliberately NOT persisted: there is nothing new to record, and writing a
+    // status here would overwrite a correct `external` with `provisioning`.
+    return notLocalResult(domainRecord.hostname);
+  }
+
   const ssl = await resolveSslProvider(project);
   // `verify` is a read-only cert inspection (no ACME) → no lock. `provision`/
   // `renew` can open an ACME order, so serialize them per-hostname on the shared
@@ -204,14 +282,18 @@ export async function manageDomainSsl(
   const result = await runAction(domainRecord.hostname, opts.action);
   await persistSslResult(domainRecord.id, domainRecord.sslStatus, result);
 
-  if (opts.includeWww) {
-    const wwwHostname = `www.${domainRecord.hostname}`;
+  const wwwHostname = opts.includeWww ? wwwSiblingHostname(domainRecord.hostname) : null;
+  if (wwwHostname) {
     const wwwRecord = await repos.domain.findByHostname(wwwHostname);
 
     if (wwwRecord && wwwRecord.projectId === domainRecord.projectId && wwwRecord.verified) {
-      // Same project → same host → reuse the resolved provider.
-      const wwwResult = await runAction(wwwRecord.hostname, opts.action);
-      await persistSslResult(wwwRecord.id, wwwRecord.sslStatus, wwwResult);
+      // The www row carries its own flags — a bare domain we issue for can have an
+      // externally-terminated or manually-certed www — so it gets the same gate.
+      if (!tlsIssuedElsewhere(wwwRecord)) {
+        // Same project → same host → reuse the resolved provider.
+        const wwwResult = await runAction(wwwRecord.hostname, opts.action);
+        await persistSslResult(wwwRecord.id, wwwRecord.sslStatus, wwwResult);
+      }
     }
   }
 

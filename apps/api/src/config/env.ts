@@ -197,6 +197,20 @@ const envSchema = z.object({
   /* ---------- OAuth Providers ---------- */
   GITHUB_CLIENT_ID: z.string().optional(),
   GITHUB_CLIENT_SECRET: z.string().optional(),
+  /**
+   * Client id used for the GitHub DEVICE flow (browser code + verification URL),
+   * when the operator has not registered their own OAuth app.
+   *
+   * Separate from GITHUB_CLIENT_ID on purpose: that one is the operator's OAuth
+   * app and needs a SECRET to complete a redirect flow. The device flow has no
+   * secret at all — the user's approval in their browser IS the credential — so a
+   * client id can ship publicly and still be safe. Without this, a fresh
+   * self-hosted instance had no in-UI GitHub login at all: it fell through to
+   * "SSH into the box and run `gh auth login`".
+   *
+   * @see DEVICE_FLOW_CLIENT_ID for the shipped default.
+   */
+  GITHUB_DEVICE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
 
@@ -451,6 +465,38 @@ if (env.DEPLOY_MODE === "desktop" && !env.OPENSHIP_AUTH_MODE && env.NODE_ENV !==
     `OPENSHIP_AUTH_MODE is required when DEPLOY_MODE="desktop". ` +
       `The launcher must declare the auth mode (the desktop app sets "none"); ` +
       `it is no longer inferred from the deploy mode.`,
+  );
+}
+
+// ─── "desktop" belongs to Electron alone ──────────────────────────────────
+//
+// DEPLOY_MODE=desktop is a POSTURE, not a convenience: it relaxes the zero-auth
+// gate (zero-auth-guard.ts), makes INTERNAL_TOKEN optional (internal-auth.ts),
+// silences the zero-auth banner, and reports `isServerHost: false` so the
+// dashboard stops treating the box as a deploy target.
+//
+// The CLI used to claim it on a bare VPS install purely to get an in-process job
+// runner. The result: a server-host install that identified as a laptop — no
+// "This Server" row (its startup hook is gated on modes:["selfhosted"]), a deploy
+// wizard offering only Openship Cloud, and a relaxed auth posture on a networked
+// box. The job runner never needed it (Redis reachability decides that).
+//
+// Electron declares BOTH DEPLOY_MODE=desktop and OPENSHIP_LOCAL_DASHBOARD_URL (it
+// serves the dashboard on a dynamic loopback port and must tell the API where).
+// Nothing else does. So a `desktop` claim without it is a launcher bug: warn
+// loudly rather than refuse, since a refusal here would brick the desktop app if
+// that pairing ever changes, and zeroAuthAllowed() still independently requires a
+// kernel-reported loopback peer.
+if (
+  env.DEPLOY_MODE === "desktop" &&
+  !env.OPENSHIP_LOCAL_DASHBOARD_URL &&
+  env.NODE_ENV !== "test"
+) {
+  console.warn(
+    `[env] DEPLOY_MODE="desktop" but OPENSHIP_LOCAL_DASHBOARD_URL is unset — ` +
+      `"desktop" is for the Electron app only. A server install should declare ` +
+      `DEPLOY_MODE="bare" (host processes) or "docker" (compose); claiming desktop ` +
+      `relaxes the zero-auth + internal-token gates and hides this box as a deploy target.`,
   );
 }
 

@@ -280,16 +280,17 @@ export type RateLimitPolicyId =
 /**
  * MCP exposure for a route. Presence of this block is the MCP allowlist:
  * routes without `mcp` are never exposed as tools (see modules/mcp/mcp-tools).
- * Co-locating it with the route keeps the description and the body-param schema
- * next to the handler instead of in a detached map.
+ * Co-locating it with the route keeps the description next to the handler
+ * instead of in a detached map.
  */
 export interface McpRouteMeta {
   /** Agent-facing tool description. */
   description: string;
   /**
-   * TypeBox schema for the request body — emitted verbatim as the tool's body
-   * params. TypeBox *is* JSON Schema, so there's no second contract to keep in
-   * sync; reuse the same schema the controller types against.
+   * @deprecated Declare the body schema ONCE via the top-level `spec.body`
+   * field instead — secureRouter auto-wires `tbValidator` from it AND the MCP
+   * layer reads it as the tool's body params, so there is a single source. This
+   * field is kept only as a fallback for the (now migrated) legacy call sites.
    */
   body?: TSchema;
 }
@@ -349,6 +350,26 @@ export interface PermissionSpec {
    *  routes (ensure/scan/import) that can reference existing projects. */
   projectCreate?: boolean;
   /**
+   * The route's BODY names the project it acts on (a required `projectId`), and
+   * its handler already asserts `{project, body.projectId, <action>}` itself.
+   * Skips the collection-level `{leaf,"*"}` pre-check here and lets that handler
+   * assert be the authority.
+   *
+   * Why this exists: `resourceId: "*"` is unsatisfiable for a `restricted`
+   * principal (`permission.ts` denies every wildcard except the project-create
+   * pair), so the pre-check wasn't a second line of defence for scoped tokens —
+   * it was the ONLY line, and it rejected them before the precise per-project
+   * check could pass. A token granted a project could not deploy that project.
+   * For owner/admin/member nothing changes: both checks resolve to the same
+   * `roleAllowsResourceType` answer.
+   *
+   * Only set this where BOTH hold, or the route loses its gate entirely:
+   *   1. `body` declares `projectId` as REQUIRED — the auto-wired validator runs
+   *      right after this middleware, so a missing id is a 400 before the handler.
+   *   2. The handler asserts on that id before doing any work.
+   */
+  collectionProject?: boolean;
+  /**
    * Restrict this route to self-hosted instances. The secure router mounts the
    * `localOnly` middleware ahead of auth, so a request in CLOUD_MODE gets a 404
    * before any handler runs. Declarative replacement for an inline
@@ -359,6 +380,16 @@ export interface PermissionSpec {
   localOnly?: boolean;
   /** Opt this route into the MCP tool surface. See {@link McpRouteMeta}. */
   mcp?: McpRouteMeta;
+  /**
+   * TypeBox schema for the JSON request body. Declared ONCE here and consumed
+   * in two places — no duplication:
+   *   1. secureRouter auto-mounts `tbValidator("json", body)` ahead of the
+   *      handlers (so every body-carrying route validates by construction).
+   *   2. The MCP layer emits it verbatim as the tool's `body` params (TypeBox
+   *      *is* JSON Schema, so there's no second contract to keep in sync).
+   * Prefer this over the deprecated `mcp.body`.
+   */
+  body?: TSchema;
 }
 
 export interface PublicSpec {
@@ -410,7 +441,13 @@ export function requirePermission(spec: PermissionSpec): MiddlewareHandler {
   return async (c: Context, next: Next) => {
     let leafId: string | undefined;
 
-    if (parsed.isList) {
+    if (spec.collectionProject) {
+      // The body names the target project and the handler asserts on it — see
+      // PermissionSpec.collectionProject for why the `"*"` pre-check is skipped
+      // rather than kept as belt-and-braces. `leafId` stays "*" so the audit
+      // record below is byte-identical to the collection branch's.
+      leafId = "*";
+    } else if (parsed.isList) {
       // List scope — org from request (X-Organization-Id header or
       // session default). No specific resource id.
       await permission.assert(getRequestContext(c), {

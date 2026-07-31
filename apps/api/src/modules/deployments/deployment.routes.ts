@@ -8,7 +8,7 @@ import { Hono } from "hono";
 import { secureRouter } from "../../lib/secure-router";
 import { cloudDeploymentProxy, cloudProjectProxyByQuery } from "../../lib/cloud/project-router";
 import * as ctrl from "./deployment.controller";
-import { TriggerDeployBody, BuildAccessBody } from "./deployment.schema";
+import { TriggerDeployBody, BuildAccessBody, PrepareDeployBody, BuildRespondBody } from "./deployment.schema";
 
 const r = secureRouter(new Hono(), {
   module: "deployments",
@@ -36,10 +36,15 @@ r.post(
   {
     tag: "deployment:write",
     collection: true,
+    // `ctrl.create` asserts {project, body.projectId, write} itself (projectId is
+    // required by TriggerDeployBody), so the collection `"*"` pre-check is
+    // redundant — and it was the reason a project-scoped token could never
+    // redeploy a project it was granted.
+    collectionProject: true,
+    body: TriggerDeployBody,
     mcp: {
       description:
         "Git-based deploy — redeploy an already-linked project from its git source. To deploy a LOCAL FOLDER instead, use the folder-upload flow: projects folder/session → (upload) → folder/scan → projects/ensure → deployments/build/access.",
-      body: TriggerDeployBody,
     },
   },
   ctrl.create,
@@ -49,6 +54,7 @@ r.post(
   {
     tag: "deployment:write",
     collection: true,
+    body: PrepareDeployBody,
     mcp: { description: "Detect stack/build config for a git repo or local path before deploying." },
   },
   ctrl.prepare,
@@ -60,10 +66,13 @@ r.post(
   {
     tag: "deployment:write",
     collection: true,
+    // `ctrl.buildAccess` asserts {project, body.projectId, write} itself — see
+    // the same flag on POST / above.
+    collectionProject: true,
+    body: BuildAccessBody,
     mcp: {
       description:
         "Deploy — the wizard 'Deploy' action. Starts the build + deployment. For a folder-upload deploy pass projectId (from projects/ensure) and uploadSessionId (from folder/session). Wizard settings (envVars, publicEndpoints, buildStrategy, runtimeMode, cloudResourceTier) are optional. Returns { success, deployment_id, project_id }. Do NOT set deployTarget:'cloud' on a self-hosted instance — it triggers promote-to-cloud; leave it unset and the upload session mode decides.",
-      body: BuildAccessBody,
     },
   },
   ctrl.buildAccess,
@@ -104,6 +113,18 @@ r.post(
   cloudDeploymentProxy,
   ctrl.buildRedeploy,
 );
+r.get(
+  "/:id/restore-plan",
+  {
+    tag: "deployment:read",
+    mcp: {
+      description:
+        "How a rollback to this deployment would run: instant from its retained image, or a rebuild from its commit.",
+    },
+  },
+  cloudDeploymentProxy,
+  ctrl.restorePlan,
+);
 r.post(
   "/:id/rollback",
   { tag: "deployment:write", mcp: { description: "Roll back to this deployment's artifact/commit." } },
@@ -122,7 +143,7 @@ r.post(
 );
 r.delete("/:id", { tag: "deployment:admin" }, cloudDeploymentProxy, ctrl.remove);
 r.post("/:id/restart", { tag: "deployment:write", mcp: { description: "Restart the running container(s) for this deployment." } }, cloudDeploymentProxy, ctrl.restart);
-r.post("/:id/build/respond", { tag: "deployment:write", mcp: { description: "Respond to a build gate/prompt for this deployment (e.g. approve a step)." } }, cloudDeploymentProxy, ctrl.buildRespond);
+r.post("/:id/build/respond", { tag: "deployment:write", body: BuildRespondBody, mcp: { description: "Respond to a build gate/prompt for this deployment (e.g. approve a step)." } }, cloudDeploymentProxy, ctrl.buildRespond);
 r.get("/:id/info", { tag: "deployment:read", mcp: { description: "Get container info for this deployment." } }, cloudDeploymentProxy, ctrl.containerInfo);
 r.get("/:id/usage", { tag: "deployment:read", mcp: { description: "Get container CPU/memory usage for this deployment." } }, cloudDeploymentProxy, ctrl.containerUsage);
 

@@ -31,7 +31,7 @@ import type {
 
 import { LocalExecutor, wrapLocalBuildCommand } from "../system/executor";
 import { execReliable } from "../system/remote-journal";
-import { STACKS, buildOutputTransferExcludes, safeErrorMessage, missingOutputDirectoryMessage, packageManagerEnsureCommand, type StackId, type StackDefinition } from "@repo/core";
+import { STACKS, appVolumeTargets, buildOutputTransferExcludes, safeErrorMessage, missingOutputDirectoryMessage, packageManagerEnsureCommand, type StackId, type StackDefinition } from "@repo/core";
 import { checkToolchainForStack, installTools } from "../toolchain";
 import type {
   RuntimeAdapter,
@@ -47,6 +47,13 @@ import { prepareStackOutput, resolveProjectDir, resolveStaticOutputPath } from "
 import type { ProcessSupervisor } from "./supervisor/types";
 import { detectSupervisor } from "./supervisor/detect";
 import { probeListeningPort } from "./port-conflict";
+
+/** Parent of a POSIX path on the TARGET machine — node:path would resolve
+ *  against the local platform's separator, which is wrong over SSH from Windows. */
+function parentPath(path: string): string {
+  const idx = path.replace(/\/+$/, "").lastIndexOf("/");
+  return idx > 0 ? path.slice(0, idx) : "/";
+}
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -78,7 +85,7 @@ const DEFAULT_BUILD_TIMEOUT = 10 * 60 * 1000;
  * Dedicated base for static doc-roots — deliberately separate from
  * DEFAULT_WORK_DIR. Static sites build in a Docker sandbox and serve their
  * extracted files from here; this is the ONE directory shared into the edge
- * container (via the `openship_static` volume) in docker-edge mode, so it must
+ * container (bind-mounted at the same path) in docker-edge mode, so it must
  * NOT contain server bundles, node_modules, or release secrets. A static-serve
  * BareRuntime is constructed with `workDir = STATIC_RELEASE_BASE` so its
  * releases/.builds subdirs confine here and promote stays same-FS.
@@ -102,6 +109,9 @@ export class BareRuntime implements RuntimeAdapter {
     "streamLogs",
     "containerIp",
     "rollback",
+    // The release dir + supervisor unit survive a redeploy, so restoring a
+    // past release really is an in-place unit swap (see makeActive).
+    "unitRestore",
     "inContainerExec",
   ]);
 
@@ -179,6 +189,68 @@ export class BareRuntime implements RuntimeAdapter {
 
   private releaseDir(deploymentId: string): string {
     return `${this.workDir}/releases/${deploymentId}`;
+  }
+
+  /** Per-project directory holding the paths that must survive a release swap.
+   *  The `shared/` half of the Capistrano layout `releases/` already implements. */
+  private sharedDir(projectId: string): string {
+    return `${this.workDir}/shared/${projectId}`;
+  }
+
+  /**
+   * Repoint the release's persistent paths at `shared/`, so a redeploy doesn't
+   * take the app's data with the old release.
+   *
+   * Docker gets this from a volume; bare has no mount to hang it on, so the
+   * equivalent is the deploy convention: keep the state outside the release tree
+   * and symlink it in. The first release that ships the path SEEDS the shared
+   * copy from it — frameworks ship a skeleton there (Laravel's `storage/` has
+   * `framework/cache`, `framework/sessions`, …) and an app handed an empty
+   * directory instead would fail on write.
+   *
+   * Best-effort per path: a box without the shared dir writable is a storage
+   * problem to report, not a reason to fail an otherwise good release.
+   */
+  private async linkPersistentPaths(
+    releaseDir: string,
+    projectId: string,
+    volumes: string[] | undefined,
+    log?: LogCallback,
+  ): Promise<void> {
+    const targets = appVolumeTargets(volumes ?? []);
+    if (targets.length === 0) return;
+
+    const shared = this.sharedDir(projectId);
+    for (const relative of targets) {
+      const sharedPath = `${shared}/${relative}`;
+      const releasePath = `${releaseDir}/${relative}`;
+      try {
+        if (!(await this.executor.exists(sharedPath))) {
+          await this.executor.mkdir(parentPath(sharedPath));
+          if (await this.executor.exists(releasePath)) {
+            await this.executor.exec(`cp -a ${sq(releasePath)} ${sq(sharedPath)}`);
+          } else {
+            await this.executor.mkdir(sharedPath);
+          }
+        }
+        await this.executor.rm(releasePath);
+        await this.executor.mkdir(parentPath(releasePath));
+        // -n so a pre-existing symlink is replaced rather than followed into
+        // (which would nest shared/storage/storage on the second deploy).
+        await this.executor.exec(`ln -sfn ${sq(sharedPath)} ${sq(releasePath)}`);
+        log?.({
+          timestamp: new Date().toISOString(),
+          message: `Persistent path ${relative} → ${sharedPath}\n`,
+          level: "info",
+        });
+      } catch (err) {
+        log?.({
+          timestamp: new Date().toISOString(),
+          message: `Could not persist ${relative}: ${safeErrorMessage(err)}\n`,
+          level: "warn",
+        });
+      }
+    }
   }
 
   private async promoteBuildArtifact(
@@ -560,6 +632,11 @@ export class BareRuntime implements RuntimeAdapter {
           config.previousDeploymentId,
         )
       : stagedDir;
+
+    // Before the process starts, not after: the app may open a file under one of
+    // these paths on boot, and it must already be the shared one.
+    await this.linkPersistentPaths(workDir, config.projectId, config.volumes, _onLog);
+
     const sv = await this.supervisor();
 
     const env: Record<string, string> = {
@@ -603,13 +680,32 @@ export class BareRuntime implements RuntimeAdapter {
           config.previousDeploymentId,
         )
       : stagedDir;
-    const staticRoot = this.resolveStaticRoot(workDir, config.outputDirectory);
+    const staticRoot = resolveStaticOutputPath(workDir, config.outputDirectory);
 
-    if (!(await this.executor.exists(staticRoot))) {
+    const abort = async (message: string): Promise<never> => {
       if (workDir !== stagedDir) {
         await this.executor.rm(workDir).catch(() => {});
       }
-      throw new Error(missingOutputDirectoryMessage(config.outputDirectory));
+      throw new Error(message);
+    };
+
+    if (!(await this.executor.exists(staticRoot))) {
+      return abort(missingOutputDirectoryMessage(config.outputDirectory));
+    }
+
+    // Present but EMPTY is unambiguously broken — no path under an empty root can
+    // serve anything, so unlike a missing index.html (which is legitimate when the
+    // site is routed only at a subpath) this needs no knowledge of the routes to
+    // call. Catches the common "build wrote nothing" / "wrong output directory"
+    // case at deploy time, where the error can still name the cause, instead of
+    // deploying green and 404ing. Index presence is left to the route-aware
+    // post-deploy audit, which is advisory by design.
+    if (await this.isEmptyDir(staticRoot)) {
+      return abort(
+        `The output directory "${config.outputDirectory || "."}" is empty — the build produced ` +
+          `no files to serve, so every request would 404. Check the build command and the ` +
+          `Output Directory setting.`,
+      );
     }
 
     return {
@@ -619,8 +715,22 @@ export class BareRuntime implements RuntimeAdapter {
     };
   }
 
-  resolveStaticRoot(containerId: string, outputDirectory: string): string {
-    return resolveStaticOutputPath(containerId, outputDirectory);
+  /**
+   * Is this an existing directory with no entries? Any inconclusive answer (not a
+   * directory, unreadable, exec failed) returns false — a probe that can't read
+   * must never be the thing that fails a deploy.
+   */
+  private async isEmptyDir(path: string): Promise<boolean> {
+    // Explicit tokens + forced exit 0, same discipline as probeStaticOutput: absence
+    // is an ANSWER here, not a command failure. A plain file (legitimately its own
+    // index) prints no DIR and is therefore never reported empty.
+    const p = sq(path);
+    const out = await this.executor
+      .exec(`if [ -d ${p} ]; then echo DIR; ls -A ${p} 2>/dev/null | head -1; fi; true`)
+      .catch(() => null);
+    if (out === null) return false; // inconclusive → never fail the deploy
+    const lines = out.split("\n").map((l) => l.trim()).filter(Boolean);
+    return lines.length === 1 && lines[0] === "DIR";
   }
 
   async stop(containerId: string): Promise<void> {
