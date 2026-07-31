@@ -33,7 +33,12 @@ r.delete("/servers/:serverId", { tag: "mail_server:admin" }, mail.forgetMailServ
 r.post("/scan", { tag: "mail_server:write" }, mail.scanMailInstall);
 r.post("/adopt", { tag: "mail_server:write" }, mail.adoptMailServer);
 r.post("/setup", { tag: "mail_server:write" }, mail.startSetup);
-r.post("/setup/port25", { tag: "mail_server:write" }, mail.recheckPort25);
+// A "/setup/port25" route referencing a `mail.recheckPort25` handler existed
+// here (from a pre-0.4.8 WIP squash commit) with no matching export in
+// mail.controller.ts - dead since it was added, would 500 if ever hit, and
+// nothing in the dashboard calls it. Removed rather than stubbed; a real
+// "recheck port 25" action would need its own handler + dashboard wiring,
+// out of scope here.
 r.post("/setup/cancel", { tag: "mail_server:write" }, mail.cancelSetup);
 r.post("/setup/dns-ack", { tag: "mail_server:write" }, mail.acknowledgeDns);
 r.post("/setup/ptr-ack", { tag: "mail_server:write" }, mail.acknowledgePtr);

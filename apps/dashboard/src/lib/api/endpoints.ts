@@ -306,7 +306,6 @@ export const endpoints = {
     scan: "mail/scan",
     adopt: "mail/adopt",
     setup: "mail/setup",
-    port25Recheck: "mail/setup/port25",
     cancelSetup: "mail/setup/cancel",
     acknowledgeDns: "mail/setup/dns-ack",
     acknowledgePtr: "mail/setup/ptr-ack",

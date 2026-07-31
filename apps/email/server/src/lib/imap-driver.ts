@@ -694,7 +694,19 @@ function extractListSnippet(bodyParts: Map<string, Buffer> | undefined, bodyStru
       text = text
         .replace(/<style[\s\S]*?<\/style>/gi, ' ')
         .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-        .replace(/<[^>]+>/g, ' ');
+        .replace(/<[^>]+>/g, ' ')
+        // The fetch window is byte-bounded, so an HTML message's markup
+        // commonly gets cut mid-tag (e.g. `<div style="margin-top`, no
+        // closing `>` yet) - the rule above needs a full `<...>` pair to
+        // match, so a dangling tag at the very end survives as literal
+        // text. Strip it too.
+        .replace(/<[^>]*$/, ' ')
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&amp;/gi, '&')
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>')
+        .replace(/&quot;/gi, '"')
+        .replace(/&#0*39;|&apos;/gi, "'");
     }
     text = text.replace(/\s+/g, ' ').trim();
 
