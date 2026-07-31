@@ -19,6 +19,13 @@ interface ModalProps {
   footer?: ReactNode;
   zIndex?: number; // Support custom z-index for modal layering
   overflow?: 'hidden' | 'auto';
+  /** Below `sm`, dock to the bottom edge as a full-width sheet (flush corners
+   *  on the bottom, rounded top) instead of a centered card — content that's
+   *  read step-by-step (setup guides, long forms) is easier to scroll one-
+   *  handed docked to an edge than floating in the middle of a small screen.
+   *  No dashboard dialog opted into this before; it's additive; the default
+   *  centered-card layout is unchanged unless a caller sets this. */
+  mobileSheet?: boolean;
 }
 
 export function Modal({
@@ -35,7 +42,8 @@ export function Modal({
   closable = true,
   footer = null,
   zIndex = 10000,
-  overflow = 'auto'
+  overflow = 'auto',
+  mobileSheet = false
 }: ModalProps) {
   const [isVisible, setIsVisible] = useState(false);
   // Portal target only exists after mount (SSR has no document).
@@ -72,7 +80,9 @@ export function Modal({
 
   return createPortal(
     <div
-      className="fixed inset-0 flex items-center justify-center p-4"
+      className={`fixed inset-0 flex justify-center ${
+        mobileSheet ? 'items-end p-0 sm:items-center sm:p-4' : 'items-center p-4'
+      }`}
       style={{ zIndex }}
       onClick={handleBackdropClick}
     >
@@ -94,13 +104,15 @@ export function Modal({
           "transparent modal" bug. Keep this high; the blur + ring + shadow are
           what sell the glass, not the transparency. */}
       <div
-        className="relative w-full border border-border/60 ring-1 ring-inset ring-foreground/[0.06] rounded-2xl shadow-2xl backdrop-blur-2xl flex flex-col transition-all duration-300 !overflow-x-hidden"
+        className={`relative w-full border border-border/60 ring-1 ring-inset ring-foreground/[0.06] shadow-2xl backdrop-blur-2xl flex flex-col transition-all duration-300 !overflow-x-hidden ${
+          mobileSheet ? 'rounded-t-2xl sm:rounded-2xl' : 'rounded-2xl'
+        }`}
         style={{
           background: 'color-mix(in oklab, var(--th-card-bg-solid) 96%, transparent)',
-          width,
+          width: mobileSheet ? undefined : width,
           overflow,
           maxWidth,
-          maxHeight,
+          maxHeight: mobileSheet ? '92vh' : maxHeight,
           height,
           minWidth,
           minHeight,

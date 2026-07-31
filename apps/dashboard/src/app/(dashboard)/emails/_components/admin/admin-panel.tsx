@@ -176,6 +176,7 @@ export function MailAdminPanel({ status, serverId, onRefresh, onForgotten }: Mai
             primaryDomain={primaryDomain}
             selectedDomain={selectedDomain}
             webmailUrl={status.webmail?.installed ? status.webmail.url : undefined}
+            credentials={status.credentials}
             onSelectDomain={(d) => setQuery({ domain: d })}
           />
         )}

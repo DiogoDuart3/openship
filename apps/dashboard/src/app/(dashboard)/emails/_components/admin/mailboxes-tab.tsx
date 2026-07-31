@@ -10,6 +10,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  Cable,
   Check,
   Copy,
   ExternalLink,
@@ -26,6 +27,7 @@ import {
   type AdminDomain,
   type AdminMailbox,
 } from "@/lib/api";
+import type { MailCredentials } from "@/lib/api/mail";
 import { useModal } from "@/context/ModalContext";
 import {
   DataTable,
@@ -38,6 +40,7 @@ import {
   FormModalContent,
   inputClassName,
 } from "./_shared/form-modal-content";
+import { ConnectClientDialog } from "./connect-client-dialog";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 
 interface MailboxesTabProps {
@@ -45,6 +48,10 @@ interface MailboxesTabProps {
   primaryDomain: string;
   selectedDomain: string;
   webmailUrl?: string;
+  /** Postmaster identity + IMAP/SMTP host info - absent while mail setup is
+   *  still in progress. Powers the "Connect a client" dialog's server
+   *  settings; that action is hidden entirely without it. */
+  credentials?: MailCredentials;
   onSelectDomain: (domain: string) => void;
 }
 
@@ -53,6 +60,7 @@ export function MailboxesTab({
   primaryDomain,
   selectedDomain,
   webmailUrl,
+  credentials,
   onSelectDomain,
 }: MailboxesTabProps) {
   const { showModal, hideModal } = useModal();
@@ -176,6 +184,26 @@ export function MailboxesTab({
     });
   };
 
+  const openConnect = (row?: AdminMailbox) => {
+    if (!credentials) return;
+    const id = showModal({
+      maxWidth: "640px",
+      height: "min(640px, 92vh)",
+      overflow: "hidden",
+      showCloseButton: true,
+      mobileSheet: true,
+      customContent: (
+        <ConnectClientDialog
+          credentials={credentials}
+          mailboxUsernames={mailboxes.map((m) => m.username)}
+          initialUsername={row?.username}
+          webmailUrl={webmailUrl}
+          onClose={() => hideModal(id)}
+        />
+      ),
+    });
+  };
+
   const openWebmail = async (row: AdminMailbox) => {
     if (!webmailUrl || !row.active || handoffLoading) return;
     const popup = window.open("about:blank", "_blank");
@@ -264,14 +292,26 @@ export function MailboxesTab({
             {t.emailsAdmin.mailboxes.description}
           </p>
         </div>
-        <button
-          onClick={openCreate}
-          disabled={!activeDomain}
-          className="inline-flex items-center gap-2 px-4 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-xl hover:bg-primary/90 transition-all hover:shadow-lg hover:shadow-primary/25 disabled:opacity-50 disabled:hover:shadow-none shrink-0"
-        >
-          <Plus className="size-4" />
-          {t.emailsAdmin.mailboxes.addMailbox}
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          {credentials && (
+            <button
+              onClick={() => openConnect()}
+              disabled={mailboxes.length === 0}
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-background text-foreground text-sm font-medium rounded-xl border border-border hover:bg-muted/50 transition-colors disabled:opacity-50"
+            >
+              <Cable className="size-4" />
+              {t.emailsAdmin.mailboxes.connectHeaderButton}
+            </button>
+          )}
+          <button
+            onClick={openCreate}
+            disabled={!activeDomain}
+            className="inline-flex items-center gap-2 px-4 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-xl hover:bg-primary/90 transition-all hover:shadow-lg hover:shadow-primary/25 disabled:opacity-50 disabled:hover:shadow-none"
+          >
+            <Plus className="size-4" />
+            {t.emailsAdmin.mailboxes.addMailbox}
+          </button>
+        </div>
       </div>
 
       <div className="flex items-center gap-2 flex-wrap">
@@ -323,6 +363,13 @@ export function MailboxesTab({
                 icon={handoffLoading === row.username ? Loader2 : ExternalLink}
                 label={t.emailsAdmin.overview.openWebmail}
                 onClick={() => void openWebmail(row)}
+              />
+            )}
+            {credentials && (
+              <RowIconButton
+                icon={Cable}
+                label={t.emailsAdmin.mailboxes.connectAction}
+                onClick={() => openConnect(row)}
               />
             )}
             <RowIconButton

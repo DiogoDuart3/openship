@@ -35,6 +35,9 @@ interface ModalConfig {
   height?: string;
   maxHeight?: string;
   overflow?: 'hidden' | 'auto';
+  /** See Modal.tsx — docks the modal to the bottom edge as a full-width sheet
+   *  below `sm` instead of a centered card. Opt-in per call. */
+  mobileSheet?: boolean;
 }
 
 interface ModalInstance {
@@ -291,6 +294,7 @@ const ModalRenderer: React.FC<ModalRendererProps> = memo(({ instance = { config:
       closable={config.closable !== false}
       zIndex={zIndex}
       overflow={config.overflow || 'auto'}
+      mobileSheet={config.mobileSheet}
     >
       {modalContent}
     </Modal>

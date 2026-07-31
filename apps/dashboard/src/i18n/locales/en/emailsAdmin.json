@@ -195,6 +195,8 @@
     "active": "Active",
     "disabled": "Disabled",
     "postmaster": "Postmaster",
+    "connectHeaderButton": "Connect a client",
+    "connectAction": "Connect a client",
     "editAction": "Edit",
     "deleteAction": "Delete",
     "loadDomainsFailed": "Failed to load domains",
@@ -242,6 +244,91 @@
       "hardDeleteLabel": "Hard delete",
       "hardDeleteDesc": "Remove DB rows and Maildir files immediately. Cannot be undone.",
       "postmasterNote": "The postmaster mailbox is hard-delete protected - only soft delete is available, so the mail server's bootstrap account stays intact."
+    },
+    "connect": {
+      "title": "Connect a mail client",
+      "description": "Set up Mail, Outlook, or another app to send and receive mail for {username}.",
+      "mailboxPickerLabel": "Mailbox",
+      "serverSettingsHeading": "Server settings",
+      "imapHeading": "Incoming - IMAP",
+      "pop3Heading": "Incoming - POP3",
+      "smtpHeading": "Outgoing - SMTP",
+      "smtpsHeading": "Outgoing - SMTP (alternative port)",
+      "accountHeading": "Account",
+      "hostLabel": "Server",
+      "portLabel": "Port",
+      "securityLabel": "Security",
+      "usernameLabel": "Username",
+      "sslTlsSecurity": "SSL/TLS",
+      "startTlsSecurity": "STARTTLS",
+      "passwordNote": "Use the mailbox's own password. Openship stores only a one-way hash, so it can't be shown here - reset it from Edit if it's been forgotten.",
+      "copy": "Copy",
+      "clientsHeading": "Step-by-step setup",
+      "openWebmailInstead": "Open webmail instead",
+      "close": "Close",
+      "clients": {
+        "iosMail": {
+          "label": "iOS Mail",
+          "steps": [
+            "Settings -> Mail -> Accounts -> Add Account.",
+            "Tap \"Other\", then \"Add Mail Account\".",
+            "Enter the mailbox's name, address, and password, then tap Next.",
+            "If asked for the server type, choose IMAP.",
+            "Enter the Incoming Mail Server host and the Outgoing Mail Server host from Server settings above.",
+            "Tap Next, then Save."
+          ]
+        },
+        "androidGmail": {
+          "label": "Android (Gmail app)",
+          "steps": [
+            "Open Gmail -> tap your profile picture -> Add another account.",
+            "Choose \"Other\".",
+            "Enter the mailbox address, then choose \"Personal (IMAP)\".",
+            "Enter the password.",
+            "On the incoming server screen, confirm the IMAP server and port from Server settings above.",
+            "On the outgoing server screen, confirm the SMTP server and port from Server settings above.",
+            "Finish setup."
+          ]
+        },
+        "macMail": {
+          "label": "macOS Mail",
+          "steps": [
+            "Mail -> Settings -> Accounts -> Add Account (or Mail -> Add Account on first run).",
+            "Choose \"Other Mail Account...\".",
+            "Enter the name, email address, and password, then click Sign In.",
+            "If Mail can't verify the account automatically, enter the Incoming and Outgoing Mail Server hosts from Server settings above and click Sign In again.",
+            "Choose which apps to use the account with, then click Done."
+          ]
+        },
+        "outlook": {
+          "label": "Outlook",
+          "steps": [
+            "File -> Add Account (or Settings -> Accounts -> Add Account in new Outlook).",
+            "Enter the mailbox address, then choose \"Advanced options\" -> \"Let me set up my account manually\" -> IMAP.",
+            "Enter the Incoming server and Outgoing server host/port/security from Server settings above.",
+            "Enter the username and password, then Connect."
+          ]
+        },
+        "thunderbird": {
+          "label": "Thunderbird",
+          "steps": [
+            "Menu -> Account Settings -> Account Actions -> Add Mail Account (or the first-run setup wizard).",
+            "Enter the name, email address, and password.",
+            "Click \"Configure manually\" and enter the IMAP and SMTP host/port/security from Server settings above.",
+            "Click Re-test if needed, then Done."
+          ]
+        },
+        "gmailWeb": {
+          "label": "Gmail (web)",
+          "steps": [
+            "In Gmail, open Settings (gear icon) -> \"See all settings\" -> Accounts and Import.",
+            "Under \"Check mail from other accounts\", click \"Add a mail account\".",
+            "Enter the mailbox address, then choose \"Import emails from my other account (POP3)\".",
+            "Enter the username, password, and the POP3 server/port from Server settings above, and enable \"Always use a secure connection (SSL) when retrieving mail\".",
+            "Optionally, under \"Send mail as\", add the address using the SMTP server/port from Server settings above so replies show this address as the sender."
+          ]
+        }
+      }
     }
   },
   "aliases": {
