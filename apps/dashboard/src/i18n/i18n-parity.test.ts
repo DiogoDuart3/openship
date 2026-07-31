@@ -19,24 +19,22 @@ import { checkI18nParity, defaultLocalesDir } from "../../scripts/check-i18n.mjs
  * goal is for every entry here to reach 0 and this map to be `{}`.
  */
 const MISSING_BASELINE: Record<string, number> = {
-  projectSettings: 1058,
-  jobs: 876,
   migration: 1237,
+  projectSettings: 1058,
   settings: 888,
+  jobs: 876,
   emailsAdmin: 628,
-  projects: 108,
   widgets: 138,
-  misc: 123,
   overview: 120,
+  library: 119,
   servers: 113,
+  misc: 105,
   importProject: 81,
   onboarding: 60,
   emails: 42,
   projectDetail: 42,
   brand: 40,
-  library: 119,
   billing: 6,
-
 };
 
 /** Stale locale keys that no longer exist in English. */
