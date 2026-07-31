@@ -667,6 +667,20 @@ function extractListSnippet(bodyParts: Map<string, Buffer> | undefined, bodyStru
     }
     if (bytes.length === 0) return '';
 
+    // The fetch window is a flat byte range across the whole multipart body,
+    // not scoped to a single part - short leaf content commonly leaves
+    // budget that runs past this part's end into the NEXT part's boundary
+    // line + headers (e.g. a one-sentence body followed by an attachment).
+    // A MIME boundary is always its own line starting with "--" and is never
+    // itself encoded (base64's alphabet excludes "-"), so cut there before
+    // decoding rather than let it leak into the snippet.
+    const rawLatin1 = bytes.toString('latin1');
+    const nextBoundaryAt = rawLatin1.search(/\r?\n--/);
+    if (nextBoundaryAt !== -1) {
+      bytes = Buffer.from(rawLatin1.slice(0, nextBoundaryAt), 'latin1');
+    }
+    if (bytes.length === 0) return '';
+
     const encoding = leaf?.encoding ?? '7bit';
     const decoded =
       encoding === 'quoted-printable'
@@ -945,7 +959,11 @@ export async function getThread(
             mimeType: ct,
             size: a.size ?? 0,
             inline: a.contentDisposition === 'inline',
-            body: '',
+            // simpleParser already decoded the full message (including this
+            // attachment's bytes) to build `parsed.text`/`parsed.html` above -
+            // `a.content` is sitting in memory either way, so shipping it
+            // base64-encoded here costs no extra IMAP round trip.
+            body: a.content ? a.content.toString('base64') : '',
             attachmentId: attId,
             headers: [],
           };
