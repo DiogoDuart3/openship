@@ -23,6 +23,20 @@ services:
       OPENSHIP_HOST_SSH_PORT: "22"
       OPENSHIP_HOST_SSH_USER: root
       OPENSHIP_HOST_SSH_KEY: /run/openship/host-key
+      # THIS install's edge is the containerized one (docker/docker-compose.yml,
+      # same as the shared routing volumes above) — without these, api can't
+      # tell and falls back to treating this box as bare-host OpenResty. It then
+      # writes _default.conf/_management.conf into the shared sites-enabled
+      # volume, duplicating what's already baked into the openship-edge image's
+      # own nginx.conf (see apps/edge/nginx.conf + DEFAULT_BLOCK in
+      # packages/adapters/src/infra/openresty-lua.ts). That's always redundant,
+      # and became FATAL ("duplicate default server for 0.0.0.0:80", crash-loop)
+      # once DEFAULT_BLOCK started emitting explicit default_server — root cause
+      # of the 2026-07-31 14:29 outage (all public sites 521 until openresty -t
+      # was hand-patched). Setting these makes createInfraProvider skip
+      # ensureOpenRestyConfig entirely for this box, matching docker/docker-compose.yml.
+      OPENSHIP_EDGE_MODE: docker
+      OPENSHIP_EDGE_CONTAINER: openship-edge
 
 volumes:
   openship_sites:
