@@ -295,7 +295,7 @@ export function GitHubConnection() {
             {/* Escape hatches — clone private repos without cloud. SSH keys
                 attach per server (Servers → GitHub); a PAT works everywhere. */}
             <div className="border-t border-border/40 pt-3">
-              <p className="text-xs font-medium text-muted-foreground/70 mb-2">
+              <p className="text-xs font-medium text-muted-foreground mb-2">
                 {t.settings.github.noCloudTitle}
               </p>
               <div className="flex flex-wrap items-center gap-2">
@@ -549,7 +549,7 @@ function GhCliBlock(props: {
 
         {/* Disconnect hint when authed. */}
         {available && (
-          <p className="text-xs text-muted-foreground/70 leading-relaxed">
+          <p className="text-xs text-muted-foreground leading-relaxed">
             {t.settings.github.ghCli.disconnectPrefix}{" "}
             <code className="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-[11px] text-foreground/80">
               gh auth logout
@@ -560,7 +560,7 @@ function GhCliBlock(props: {
 
         {/* Clone-token shortcut — a personal access token is the other way to
             authorize clones (no gh, no cloud). */}
-        <p className="text-xs text-muted-foreground/70 leading-relaxed">
+        <p className="text-xs text-muted-foreground leading-relaxed">
           {t.settings.github.ghCli.tokenAltPrefix}{" "}
           <button
             type="button"
