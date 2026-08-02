@@ -290,10 +290,19 @@ function parseDurationNs(value: string | undefined): number | undefined {
 
 /**
  * Convert a parsed compose healthcheck into a Docker Engine Healthcheck object.
- * `test` string → `["CMD-SHELL", cmd]`; `test` array → `["CMD", ...argv]`;
- * `disable` → `["NONE"]` (turns off an image's baked-in check). Returns
- * undefined when there's nothing to configure so the image default stands.
+ * `test` string → `["CMD-SHELL", cmd]`; `test` array → `["CMD", ...argv]`,
+ * UNLESS the array already leads with a Docker Test-form token (`CMD`,
+ * `CMD-SHELL`, `NONE` — the doc-comment on `ComposeHealthcheck.test` calls out
+ * this pre-prefixed `CMD-SHELL` array as an accepted shape), in which case it
+ * passes through as-is; re-prefixing it produced `["CMD", "CMD-SHELL", cmd]`,
+ * which Docker exec's literally (`exec: "CMD-SHELL": executable file not
+ * found`) — every catalog healthcheck authored in that form silently never
+ * went healthy. `disable` → `["NONE"]` (turns off an image's baked-in check).
+ * Returns undefined when there's nothing to configure so the image default
+ * stands.
  */
+const DOCKER_HEALTHCHECK_TEST_FORMS = new Set(["CMD", "CMD-SHELL", "NONE"]);
+
 function toDockerHealthcheck(hc?: ComposeHealthcheck):
   | { Test: string[]; Interval?: number; Timeout?: number; Retries?: number; StartPeriod?: number }
   | undefined {
@@ -304,7 +313,9 @@ function toDockerHealthcheck(hc?: ComposeHealthcheck):
   if (typeof hc.test === "string" && hc.test.trim()) {
     Test = ["CMD-SHELL", hc.test];
   } else if (Array.isArray(hc.test) && hc.test.length > 0) {
-    Test = ["CMD", ...hc.test];
+    Test = DOCKER_HEALTHCHECK_TEST_FORMS.has(hc.test[0])
+      ? hc.test
+      : ["CMD", ...hc.test];
   }
   if (!Test) return undefined;
 
