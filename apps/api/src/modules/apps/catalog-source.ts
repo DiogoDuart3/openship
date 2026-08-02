@@ -7,6 +7,7 @@ import {
 } from "@repo/core";
 import { repos } from "@repo/db";
 import { readApiVersion } from "../../lib/release-dist";
+import { env } from "../../config/env";
 
 /**
  * Runtime app catalog = the BUNDLED catalog (`@repo/core` APP_TEMPLATES) overlaid
@@ -188,8 +189,17 @@ async function fetchRemote(): Promise<{ entries: AppTemplate[]; tooNew: Resolved
   }
 }
 
+/**
+ * Escape hatch for the remote overlay (default on). A fork carrying its own
+ * catalog customizations (or an air-gapped box) would otherwise have them
+ * silently reverted by the next successful upstream fetch - remote-wins has
+ * no concept of "local edit, don't overwrite". Sets the bundled catalog as
+ * the sole source of truth; it just never refreshes.
+ */
+const overlayDisabled = env.OPENSHIP_CATALOG_DISABLE_REMOTE === "true";
+
 function refresh(): void {
-  if (refreshing) return;
+  if (overlayDisabled || refreshing) return;
   refreshing = true;
   void fetchRemote()
     .then((remote) => {

@@ -1,8 +1,8 @@
 {
-  "available": false,
+  "available": true,
   "id": "metabase",
   "name": "Metabase",
-  "description": "Open-source business intelligence — dashboards and questions over your data.",
+  "description": "Open-source business intelligence \u2014 dashboards and questions over your data.",
   "kind": "template",
   "logo": "metabase",
   "category": "analytics",
@@ -15,7 +15,7 @@
   "services": [
     {
       "name": "metabase",
-      "image": "metabase/metabase:latest",
+      "image": "metabase/metabase:v0.63.x",
       "ports": [
         "3000:3000"
       ],
@@ -27,7 +27,17 @@
       "volumes": [
         "metabase_data:/metabase-data"
       ],
-      "restart": "unless-stopped"
+      "restart": "unless-stopped",
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:3000/ >/dev/null 2>&1 || curl -fsS http://127.0.0.1:3000/ >/dev/null 2>&1"
+        ],
+        "interval": "10s",
+        "timeout": "5s",
+        "retries": 5,
+        "startPeriod": "45s"
+      }
     }
   ]
 }

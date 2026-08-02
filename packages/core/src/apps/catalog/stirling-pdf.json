@@ -1,8 +1,8 @@
 {
-  "available": false,
+  "available": true,
   "id": "stirling-pdf",
   "name": "Stirling PDF",
-  "description": "Split, merge, convert, OCR and edit PDFs locally. Default login is admin / stirling — change it.",
+  "description": "Split, merge, convert, OCR and edit PDFs locally. Default login is admin / stirling \u2014 change it.",
   "kind": "template",
   "logo": "stirling-pdf",
   "category": "other",
@@ -15,7 +15,7 @@
   "services": [
     {
       "name": "stirling-pdf",
-      "image": "stirlingtools/stirling-pdf:latest",
+      "image": "stirlingtools/stirling-pdf:2.14.2-ultra-lite",
       "ports": [
         "8080:8080"
       ],
@@ -25,7 +25,17 @@
         "stirling_config:/configs",
         "stirling_tessdata:/usr/share/tessdata"
       ],
-      "restart": "unless-stopped"
+      "restart": "unless-stopped",
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:8080/ >/dev/null 2>&1 || curl -fsS http://127.0.0.1:8080/ >/dev/null 2>&1"
+        ],
+        "interval": "10s",
+        "timeout": "5s",
+        "retries": 5,
+        "startPeriod": "30s"
+      }
     }
   ]
 }

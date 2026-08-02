@@ -1,5 +1,5 @@
 {
-  "available": false,
+  "available": true,
   "id": "code-server",
   "name": "code-server",
   "description": "Run VS Code in your browser, on your server. Login uses an auto-generated password.",
@@ -15,7 +15,7 @@
   "services": [
     {
       "name": "code-server",
-      "image": "codercom/code-server:latest",
+      "image": "codercom/code-server:4.131.0",
       "ports": [
         "8080:8080"
       ],
@@ -25,11 +25,19 @@
         "PASSWORD"
       ],
       "volumes": [
-        "code_server_config:/home/coder/.config",
-        "code_server_local:/home/coder/.local",
-        "code_server_project:/home/coder/project"
+        "code_server_home:/home/coder"
       ],
-      "restart": "unless-stopped"
+      "restart": "unless-stopped",
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:8080/ >/dev/null 2>&1 || curl -fsS http://127.0.0.1:8080/ >/dev/null 2>&1"
+        ],
+        "interval": "10s",
+        "timeout": "5s",
+        "retries": 5,
+        "startPeriod": "20s"
+      }
     }
   ],
   "configFields": [

@@ -1,5 +1,5 @@
 {
-  "available": false,
+  "available": true,
   "id": "gitea",
   "name": "Gitea",
   "description": "Self-hosted Git with issues, pull requests, and a first-run setup wizard.",
@@ -27,7 +27,17 @@
       "volumes": [
         "gitea_data:/data"
       ],
-      "restart": "unless-stopped"
+      "restart": "unless-stopped",
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:3000/ >/dev/null 2>&1 || curl -fsS http://127.0.0.1:3000/ >/dev/null 2>&1"
+        ],
+        "interval": "10s",
+        "timeout": "5s",
+        "retries": 5,
+        "startPeriod": "20s"
+      }
     }
   ]
 }

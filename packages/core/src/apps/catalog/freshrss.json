@@ -1,5 +1,5 @@
 {
-  "available": false,
+  "available": true,
   "id": "freshrss",
   "name": "FreshRSS",
   "description": "Self-hosted RSS and Atom feed reader with a first-run setup wizard.",
@@ -15,16 +15,26 @@
   "services": [
     {
       "name": "freshrss",
-      "image": "freshrss/freshrss:latest",
+      "image": "freshrss/freshrss:1.29.1-alpine",
       "ports": [
-        "80:80"
+        "8223:80"
       ],
-      "exposedPort": 80,
+      "exposedPort": 8223,
       "exposed": true,
       "volumes": [
         "freshrss_data:/var/www/FreshRSS/data"
       ],
-      "restart": "unless-stopped"
+      "restart": "unless-stopped",
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1 || curl -fsS http://127.0.0.1:80/ >/dev/null 2>&1"
+        ],
+        "interval": "10s",
+        "timeout": "5s",
+        "retries": 5,
+        "startPeriod": "20s"
+      }
     }
   ]
 }

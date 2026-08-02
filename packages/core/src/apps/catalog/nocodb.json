@@ -1,5 +1,5 @@
 {
-  "available": false,
+  "available": true,
   "id": "nocodb",
   "name": "NocoDB",
   "description": "Airtable-style spreadsheet UI over an SQL database. The first sign-up becomes the admin.",
@@ -15,7 +15,7 @@
   "services": [
     {
       "name": "nocodb",
-      "image": "nocodb/nocodb:latest",
+      "image": "nocodb/nocodb:2026.07.0",
       "ports": [
         "8080:8080"
       ],
@@ -24,7 +24,17 @@
       "volumes": [
         "nocodb_data:/usr/app/data"
       ],
-      "restart": "unless-stopped"
+      "restart": "unless-stopped",
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:8080/ >/dev/null 2>&1 || curl -fsS http://127.0.0.1:8080/ >/dev/null 2>&1"
+        ],
+        "interval": "10s",
+        "timeout": "5s",
+        "retries": 5,
+        "startPeriod": "20s"
+      }
     }
   ]
 }

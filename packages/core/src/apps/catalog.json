@@ -930,7 +930,7 @@
       ]
     },
     {
-      "available": false,
+      "available": true,
       "id": "ghost",
       "name": "Ghost",
       "description": "Modern publishing platform for blogs, newsletters, and membership sites.",
@@ -956,11 +956,24 @@
           "volumes": [
             "ghost_db:/var/lib/mysql"
           ],
-          "restart": "unless-stopped"
+          "restart": "unless-stopped",
+          "healthcheck": {
+            "test": [
+              "CMD",
+              "mysqladmin",
+              "ping",
+              "-h",
+              "localhost"
+            ],
+            "interval": "10s",
+            "timeout": "5s",
+            "retries": 5,
+            "startPeriod": "20s"
+          }
         },
         {
           "name": "ghost",
-          "image": "ghost:5-alpine",
+          "image": "ghost:6-alpine",
           "ports": [
             "2368:2368"
           ],
@@ -983,7 +996,17 @@
           "volumes": [
             "ghost_content:/var/lib/ghost/content"
           ],
-          "restart": "unless-stopped"
+          "restart": "unless-stopped",
+          "healthcheck": {
+            "test": [
+              "CMD-SHELL",
+              "wget -qO- http://127.0.0.1:2368/ >/dev/null 2>&1 || curl -fsS http://127.0.0.1:2368/ >/dev/null 2>&1"
+            ],
+            "interval": "10s",
+            "timeout": "10s",
+            "retries": 5,
+            "startPeriod": "30s"
+          }
         }
       ],
       "configFields": [
@@ -1006,7 +1029,7 @@
       ]
     },
     {
-      "available": false,
+      "available": true,
       "id": "directus",
       "name": "Directus",
       "description": "Headless CMS with an instant REST + GraphQL API over your data. Create the admin on first visit.",
@@ -1022,7 +1045,7 @@
       "services": [
         {
           "name": "directus",
-          "image": "directus/directus:latest",
+          "image": "directus/directus:12",
           "ports": [
             "8055:8055"
           ],
@@ -1040,7 +1063,17 @@
             "directus_database:/directus/database",
             "directus_uploads:/directus/uploads"
           ],
-          "restart": "unless-stopped"
+          "restart": "unless-stopped",
+          "healthcheck": {
+            "test": [
+              "CMD-SHELL",
+              "wget -qO- http://127.0.0.1:8055/server/ping >/dev/null 2>&1"
+            ],
+            "interval": "10s",
+            "timeout": "5s",
+            "retries": 5,
+            "startPeriod": "20s"
+          }
         }
       ],
       "configFields": [
@@ -1055,7 +1088,7 @@
       ]
     },
     {
-      "available": false,
+      "available": true,
       "id": "nocodb",
       "name": "NocoDB",
       "description": "Airtable-style spreadsheet UI over an SQL database. The first sign-up becomes the admin.",
@@ -1071,7 +1104,7 @@
       "services": [
         {
           "name": "nocodb",
-          "image": "nocodb/nocodb:latest",
+          "image": "nocodb/nocodb:2026.07.0",
           "ports": [
             "8080:8080"
           ],
@@ -1080,12 +1113,22 @@
           "volumes": [
             "nocodb_data:/usr/app/data"
           ],
-          "restart": "unless-stopped"
+          "restart": "unless-stopped",
+          "healthcheck": {
+            "test": [
+              "CMD-SHELL",
+              "wget -qO- http://127.0.0.1:8080/ >/dev/null 2>&1 || curl -fsS http://127.0.0.1:8080/ >/dev/null 2>&1"
+            ],
+            "interval": "10s",
+            "timeout": "5s",
+            "retries": 5,
+            "startPeriod": "20s"
+          }
         }
       ]
     },
     {
-      "available": false,
+      "available": true,
       "id": "metabase",
       "name": "Metabase",
       "description": "Open-source business intelligence — dashboards and questions over your data.",
@@ -1101,7 +1144,7 @@
       "services": [
         {
           "name": "metabase",
-          "image": "metabase/metabase:latest",
+          "image": "metabase/metabase:v0.63.x",
           "ports": [
             "3000:3000"
           ],
@@ -1113,7 +1156,17 @@
           "volumes": [
             "metabase_data:/metabase-data"
           ],
-          "restart": "unless-stopped"
+          "restart": "unless-stopped",
+          "healthcheck": {
+            "test": [
+              "CMD-SHELL",
+              "wget -qO- http://127.0.0.1:3000/ >/dev/null 2>&1 || curl -fsS http://127.0.0.1:3000/ >/dev/null 2>&1"
+            ],
+            "interval": "10s",
+            "timeout": "5s",
+            "retries": 5,
+            "startPeriod": "45s"
+          }
         }
       ]
     },
@@ -1152,7 +1205,7 @@
       ]
     },
     {
-      "available": false,
+      "available": true,
       "id": "gitea",
       "name": "Gitea",
       "description": "Self-hosted Git with issues, pull requests, and a first-run setup wizard.",
@@ -1180,12 +1233,22 @@
           "volumes": [
             "gitea_data:/data"
           ],
-          "restart": "unless-stopped"
+          "restart": "unless-stopped",
+          "healthcheck": {
+            "test": [
+              "CMD-SHELL",
+              "wget -qO- http://127.0.0.1:3000/ >/dev/null 2>&1 || curl -fsS http://127.0.0.1:3000/ >/dev/null 2>&1"
+            ],
+            "interval": "10s",
+            "timeout": "5s",
+            "retries": 5,
+            "startPeriod": "20s"
+          }
         }
       ]
     },
     {
-      "available": false,
+      "available": true,
       "id": "code-server",
       "name": "code-server",
       "description": "Run VS Code in your browser, on your server. Login uses an auto-generated password.",
@@ -1201,7 +1264,7 @@
       "services": [
         {
           "name": "code-server",
-          "image": "codercom/code-server:latest",
+          "image": "codercom/code-server:4.131.0",
           "ports": [
             "8080:8080"
           ],
@@ -1211,11 +1274,19 @@
             "PASSWORD"
           ],
           "volumes": [
-            "code_server_config:/home/coder/.config",
-            "code_server_local:/home/coder/.local",
-            "code_server_project:/home/coder/project"
+            "code_server_home:/home/coder"
           ],
-          "restart": "unless-stopped"
+          "restart": "unless-stopped",
+          "healthcheck": {
+            "test": [
+              "CMD-SHELL",
+              "wget -qO- http://127.0.0.1:8080/ >/dev/null 2>&1 || curl -fsS http://127.0.0.1:8080/ >/dev/null 2>&1"
+            ],
+            "interval": "10s",
+            "timeout": "5s",
+            "retries": 5,
+            "startPeriod": "20s"
+          }
         }
       ],
       "configFields": [
@@ -1230,7 +1301,7 @@
       ]
     },
     {
-      "available": false,
+      "available": true,
       "id": "uptime-kuma",
       "name": "Uptime Kuma",
       "description": "Self-hosted uptime monitoring with status pages and alerts.",
@@ -1246,21 +1317,31 @@
       "services": [
         {
           "name": "uptime-kuma",
-          "image": "louislam/uptime-kuma:1",
+          "image": "louislam/uptime-kuma:2-slim",
           "ports": [
-            "3001:3001"
+            "3011:3001"
           ],
-          "exposedPort": 3001,
+          "exposedPort": 3011,
           "exposed": true,
           "volumes": [
             "uptime_kuma_data:/app/data"
           ],
-          "restart": "unless-stopped"
+          "restart": "unless-stopped",
+          "healthcheck": {
+            "test": [
+              "CMD-SHELL",
+              "wget -qO- http://127.0.0.1:3001/ >/dev/null 2>&1 || curl -fsS http://127.0.0.1:3001/ >/dev/null 2>&1"
+            ],
+            "interval": "10s",
+            "timeout": "5s",
+            "retries": 5,
+            "startPeriod": "20s"
+          }
         }
       ]
     },
     {
-      "available": false,
+      "available": true,
       "id": "vaultwarden",
       "name": "Vaultwarden",
       "description": "Lightweight self-hosted password manager (Bitwarden-compatible).",
@@ -1276,11 +1357,11 @@
       "services": [
         {
           "name": "vaultwarden",
-          "image": "vaultwarden/server:latest",
+          "image": "vaultwarden/server:1.37.1-alpine",
           "ports": [
-            "80:80"
+            "8222:80"
           ],
-          "exposedPort": 80,
+          "exposedPort": 8222,
           "exposed": true,
           "environment": {
             "DOMAIN": "{{publicUrl:vaultwarden}}"
@@ -1288,12 +1369,22 @@
           "volumes": [
             "vaultwarden_data:/data"
           ],
-          "restart": "unless-stopped"
+          "restart": "unless-stopped",
+          "healthcheck": {
+            "test": [
+              "CMD-SHELL",
+              "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1 || curl -fsS http://127.0.0.1:80/ >/dev/null 2>&1"
+            ],
+            "interval": "10s",
+            "timeout": "5s",
+            "retries": 5,
+            "startPeriod": "15s"
+          }
         }
       ]
     },
     {
-      "available": false,
+      "available": true,
       "id": "freshrss",
       "name": "FreshRSS",
       "description": "Self-hosted RSS and Atom feed reader with a first-run setup wizard.",
@@ -1309,21 +1400,31 @@
       "services": [
         {
           "name": "freshrss",
-          "image": "freshrss/freshrss:latest",
+          "image": "freshrss/freshrss:1.29.1-alpine",
           "ports": [
-            "80:80"
+            "8223:80"
           ],
-          "exposedPort": 80,
+          "exposedPort": 8223,
           "exposed": true,
           "volumes": [
             "freshrss_data:/var/www/FreshRSS/data"
           ],
-          "restart": "unless-stopped"
+          "restart": "unless-stopped",
+          "healthcheck": {
+            "test": [
+              "CMD-SHELL",
+              "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1 || curl -fsS http://127.0.0.1:80/ >/dev/null 2>&1"
+            ],
+            "interval": "10s",
+            "timeout": "5s",
+            "retries": 5,
+            "startPeriod": "20s"
+          }
         }
       ]
     },
     {
-      "available": false,
+      "available": true,
       "id": "stirling-pdf",
       "name": "Stirling PDF",
       "description": "Split, merge, convert, OCR and edit PDFs locally. Default login is admin / stirling — change it.",
@@ -1339,7 +1440,7 @@
       "services": [
         {
           "name": "stirling-pdf",
-          "image": "stirlingtools/stirling-pdf:latest",
+          "image": "stirlingtools/stirling-pdf:2.14.2-ultra-lite",
           "ports": [
             "8080:8080"
           ],
@@ -1349,12 +1450,22 @@
             "stirling_config:/configs",
             "stirling_tessdata:/usr/share/tessdata"
           ],
-          "restart": "unless-stopped"
+          "restart": "unless-stopped",
+          "healthcheck": {
+            "test": [
+              "CMD-SHELL",
+              "wget -qO- http://127.0.0.1:8080/ >/dev/null 2>&1 || curl -fsS http://127.0.0.1:8080/ >/dev/null 2>&1"
+            ],
+            "interval": "10s",
+            "timeout": "5s",
+            "retries": 5,
+            "startPeriod": "30s"
+          }
         }
       ]
     },
     {
-      "available": false,
+      "available": true,
       "id": "it-tools",
       "name": "IT-Tools",
       "description": "A handy collection of developer and sysadmin utilities. No login, no setup.",
@@ -1370,13 +1481,23 @@
       "services": [
         {
           "name": "it-tools",
-          "image": "corentinth/it-tools:latest",
+          "image": "corentinth/it-tools:2024.10.22-7ca5933",
           "ports": [
-            "80:80"
+            "8224:80"
           ],
-          "exposedPort": 80,
+          "exposedPort": 8224,
           "exposed": true,
-          "restart": "unless-stopped"
+          "restart": "unless-stopped",
+          "healthcheck": {
+            "test": [
+              "CMD-SHELL",
+              "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1 || curl -fsS http://127.0.0.1:80/ >/dev/null 2>&1"
+            ],
+            "interval": "10s",
+            "timeout": "5s",
+            "retries": 5,
+            "startPeriod": "10s"
+          }
         }
       ]
     },

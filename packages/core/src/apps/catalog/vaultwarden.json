@@ -1,5 +1,5 @@
 {
-  "available": false,
+  "available": true,
   "id": "vaultwarden",
   "name": "Vaultwarden",
   "description": "Lightweight self-hosted password manager (Bitwarden-compatible).",
@@ -15,11 +15,11 @@
   "services": [
     {
       "name": "vaultwarden",
-      "image": "vaultwarden/server:latest",
+      "image": "vaultwarden/server:1.37.1-alpine",
       "ports": [
-        "80:80"
+        "8222:80"
       ],
-      "exposedPort": 80,
+      "exposedPort": 8222,
       "exposed": true,
       "environment": {
         "DOMAIN": "{{publicUrl:vaultwarden}}"
@@ -27,7 +27,17 @@
       "volumes": [
         "vaultwarden_data:/data"
       ],
-      "restart": "unless-stopped"
+      "restart": "unless-stopped",
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1 || curl -fsS http://127.0.0.1:80/ >/dev/null 2>&1"
+        ],
+        "interval": "10s",
+        "timeout": "5s",
+        "retries": 5,
+        "startPeriod": "15s"
+      }
     }
   ]
 }

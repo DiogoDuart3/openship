@@ -1,5 +1,5 @@
 {
-  "available": false,
+  "available": true,
   "id": "ghost",
   "name": "Ghost",
   "description": "Modern publishing platform for blogs, newsletters, and membership sites.",
@@ -25,11 +25,24 @@
       "volumes": [
         "ghost_db:/var/lib/mysql"
       ],
-      "restart": "unless-stopped"
+      "restart": "unless-stopped",
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "mysqladmin",
+          "ping",
+          "-h",
+          "localhost"
+        ],
+        "interval": "10s",
+        "timeout": "5s",
+        "retries": 5,
+        "startPeriod": "20s"
+      }
     },
     {
       "name": "ghost",
-      "image": "ghost:5-alpine",
+      "image": "ghost:6-alpine",
       "ports": [
         "2368:2368"
       ],
@@ -52,7 +65,17 @@
       "volumes": [
         "ghost_content:/var/lib/ghost/content"
       ],
-      "restart": "unless-stopped"
+      "restart": "unless-stopped",
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:2368/ >/dev/null 2>&1 || curl -fsS http://127.0.0.1:2368/ >/dev/null 2>&1"
+        ],
+        "interval": "10s",
+        "timeout": "10s",
+        "retries": 5,
+        "startPeriod": "30s"
+      }
     }
   ],
   "configFields": [

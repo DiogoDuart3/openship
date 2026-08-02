@@ -1,5 +1,5 @@
 {
-  "available": false,
+  "available": true,
   "id": "it-tools",
   "name": "IT-Tools",
   "description": "A handy collection of developer and sysadmin utilities. No login, no setup.",
@@ -15,13 +15,23 @@
   "services": [
     {
       "name": "it-tools",
-      "image": "corentinth/it-tools:latest",
+      "image": "corentinth/it-tools:2024.10.22-7ca5933",
       "ports": [
-        "80:80"
+        "8224:80"
       ],
-      "exposedPort": 80,
+      "exposedPort": 8224,
       "exposed": true,
-      "restart": "unless-stopped"
+      "restart": "unless-stopped",
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1 || curl -fsS http://127.0.0.1:80/ >/dev/null 2>&1"
+        ],
+        "interval": "10s",
+        "timeout": "5s",
+        "retries": 5,
+        "startPeriod": "10s"
+      }
     }
   ]
 }

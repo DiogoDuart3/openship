@@ -37,6 +37,26 @@ services:
       # ensureOpenRestyConfig entirely for this box, matching docker/docker-compose.yml.
       OPENSHIP_EDGE_MODE: docker
       OPENSHIP_EDGE_CONTAINER: openship-edge
+      # TEMPORARY, session-scoped (catalog Phase-1 QA, 2026-08-01): the app
+      # catalog's remote overlay (see catalog-source.ts) is remote-wins with no
+      # concept of "local edit, don't overwrite" - so this fork's local
+      # available:true flips for the 12 QA'd apps would be silently reverted by
+      # the next successful upstream fetch. Remove once these fixes land in an
+      # upstream PR (matching the session's other cherry-picked fixes); the
+      # remote overlay is otherwise a deliberate, useful feature and shouldn't
+      # stay disabled indefinitely on a fork that plans to upstream its work.
+      OPENSHIP_CATALOG_DISABLE_REMOTE: "true"
+      # Missing on this box (discovered during catalog Phase-1 QA, 2026-08-01):
+      # without it, resolveServerHost() (apps/api/src/lib/server-target.ts)
+      # returns null for any project with no serverId snapshot, which skips
+      # deploy.service.ts's "port-only, no-domain" {{publicUrl:<service>}}
+      # fallback entirely (not "resolves wrong" — resolves to the EMPTY
+      # string). Any catalog app that bakes its own base URL into runtime
+      # config (Ghost's `url`, Directus' PUBLIC_URL, Gitea's ROOT_URL,
+      # Vaultwarden's DOMAIN, ...) then fails strict URL validation and
+      # crash-loops on a plain port-only install. Real public IP, confirmed via
+      # `curl -4 ifconfig.me` on the host earlier this session.
+      SERVER_IP: "152.228.238.183"
 
 volumes:
   openship_sites:

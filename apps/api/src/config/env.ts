@@ -125,6 +125,10 @@ const envSchema = z.object({
   OPENSHIP_DASHBOARD_PORT: z.coerce.number().int().positive().catch(3001),
   /** Let's Encrypt contact email for the managed edge (defaults to the admin). */
   OPENSHIP_ACME_EMAIL: z.string().optional(),
+  /** Skip the app-catalog's remote overlay fetch (see catalog-source.ts) - the
+   *  bundled catalog becomes the sole source. For forks carrying their own
+   *  catalog customizations, or air-gapped installs. */
+  OPENSHIP_CATALOG_DISABLE_REMOTE: z.enum(["true", "false"]).optional(),
 
   /* ---------- Mode ---------- */
   CLOUD_MODE: envBool("false"),
