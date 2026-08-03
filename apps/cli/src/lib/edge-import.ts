@@ -11,7 +11,8 @@
  */
 import chalk from "chalk";
 import ora from "ora";
-import type { ImportedSite } from "@repo/adapters/proxy";
+import { EDGE_CONTAINER_NAME, edgeCrashReason, type ImportedSite } from "@repo/adapters/proxy";
+import { LocalExecutor } from "@repo/adapters";
 import { composeInternalToken } from "./compose";
 
 /** Wait for the compose api container to answer its health stub. */
@@ -23,6 +24,28 @@ export async function waitForApiHealth(port: string, tries: number): Promise<boo
     } catch {
       /* not up yet */
     }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  return false;
+}
+
+/**
+ * Wait for the EDGE container to actually be running — not just the API.
+ *
+ * Registration reloads the edge via `docker exec <edge> …`, which throws a raw
+ * `(HTTP code 409) … container is not running` against a container that is still
+ * starting. `compose up` reports the edge "Started" the instant it's created, and
+ * we only waited on API health, so the import could fire into that gap and every
+ * site failed with an identical, misleading 409 — then the edge finished starting
+ * and served fine. Gating on the edge's actual running state closes that race.
+ */
+export async function waitForEdgeRunning(tries: number): Promise<boolean> {
+  const exec = new LocalExecutor();
+  for (let i = 0; i < tries; i++) {
+    const out = await exec
+      .exec(`docker inspect -f '{{.State.Running}}' ${EDGE_CONTAINER_NAME}`)
+      .catch(() => "");
+    if (out.trim() === "true") return true;
     await new Promise((r) => setTimeout(r, 1000));
   }
   return false;
@@ -60,6 +83,14 @@ export async function importMigratedSites(
     spinner.warn(`${error} — migrated sites not imported. Re-run \`openship up\` to retry.`);
     return { ok: false, registered: [], error };
   }
+  // The edge must be RUNNING before we register: the reload execs into it, and a
+  // container that's still starting 409s. Without this gate the whole import
+  // fails against the edge's own not-yet-running container (the migration race).
+  if (!(await waitForEdgeRunning(60))) {
+    const error = `the ${EDGE_CONTAINER_NAME} container isn't running yet`;
+    spinner.warn(`${error} — migrated sites not imported. Re-run \`openship up\` to retry.`);
+    return { ok: false, registered: [], error };
+  }
   try {
     const r = await fetch(`http://127.0.0.1:${apiPort}/api/system/edge/import-sites`, {
       method: "POST",
@@ -91,10 +122,19 @@ export async function importMigratedSites(
           `Openship holds :80/:443 and ${sites.length === 1 ? "that hostname is" : "those hostnames are"} NOT being served.`,
       );
       for (const w of warnings.slice(0, 8)) console.log(chalk.red(`    • ${w}`));
+      // Every per-site error being "container is restarting" means ONE thing: the
+      // edge itself is crash-looping, and the reason is in its log, not in the six
+      // identical 409s above. Print it — otherwise "the cause above" names nothing
+      // and the operator is left guessing at a config error they can't see.
+      const edgeLog = await edgeCrashReason(new LocalExecutor());
+      if (edgeLog) {
+        console.log(chalk.red(`\n  The edge container is not running. Its log says:`));
+        console.log(chalk.red(`    ${edgeLog}`));
+      }
       console.log(
         chalk.yellow(
           `\n  Retry the import with \`openship up\` once the cause above is fixed, or put your\n` +
-            `  previous proxy back:  docker stop openship-edge && sudo systemctl enable --now nginx\n`,
+            `  previous proxy back:  docker stop ${EDGE_CONTAINER_NAME} && sudo systemctl enable --now nginx\n`,
         ),
       );
       return { ok: false, registered, error: warnings[0] ?? "no sites were registered" };

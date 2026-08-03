@@ -18,9 +18,9 @@ import { app, net, utilityProcess } from "electron";
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
 import { join } from "node:path";
 import { LOCAL_API_URL, LOCAL_DASHBOARD_URL } from "@repo/core";
+import { resolvePortPair } from "@repo/core/ports";
 
 // The API + dashboard both run under Electron's OWN Node (utilityProcess.fork —
 // no Dock tile), NOT a bun binary. `NodeService` is either that utility process
@@ -59,28 +59,6 @@ let localDashboardUrl = LOCAL_DASHBOARD_URL;
 export const getLocalApiUrl = (): string => localApiUrl;
 /** The dashboard origin the app is actually using (dynamic once packaged). */
 export const getLocalDashboardUrl = (): string => localDashboardUrl;
-
-/** Reserve a free TCP port on loopback (bind :0, read it, release). */
-function getFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.once("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const addr = srv.address();
-      const port = addr && typeof addr === "object" ? addr.port : 0;
-      srv.close(() => (port ? resolve(port) : reject(new Error("no free port"))));
-    });
-  });
-}
-
-/** True if a specific TCP port is bindable on loopback right now. */
-function isPortFree(port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const srv = createServer();
-    srv.once("error", () => resolve(false));
-    srv.listen(port, "127.0.0.1", () => srv.close(() => resolve(true)));
-  });
-}
 
 /**
  * Persist the chosen ports so a restart reuses the SAME origin. Session cookies
@@ -124,6 +102,12 @@ function resourcePaths() {
     // misses and it silently downloads 8.8 MB from GitHub on the first
     // server-flag lookup (and shows no flags at all offline).
     geoipDb: join(root, "geoip", "GeoLite2-Country.mmdb"),
+    // The iRedMail engine tree the mail-server install packs and streams to the
+    // target VPS. Handed to the API as MAIL_SERVER_ENGINE_DIR below — its own
+    // default resolves relative to apps/api's cwd, which is WRONG here (the API
+    // runs with cwd=userData), producing "tar: could not chdir to
+    // '…/Library/apps/email/engine'".
+    engineDir: join(root, "engine"),
     dashboardDir: join(root, "dashboard", "apps", "dashboard"),
     // ssh2 + dockerode live here (external to the API bundle); the API resolves
     // them via NODE_PATH — see startApi below.
@@ -294,7 +278,7 @@ export async function startLocalServices(internalToken: string): Promise<void> {
   if (started) return;
   started = true;
 
-  const { apiEntry, migrationsDir, pgliteDir, geoipDb, dashboardDir, nodeModulesDir } =
+  const { apiEntry, migrationsDir, pgliteDir, geoipDb, engineDir, dashboardDir, nodeModulesDir } =
     resourcePaths();
   const userData = app.getPath("userData");
   const dataDir = join(userData, "data");
@@ -312,20 +296,23 @@ export async function startLocalServices(internalToken: string): Promise<void> {
   const MAX_ATTEMPTS = 3;
   const stored = loadStoredPorts();
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    // Attempt 1 reuses last run's ports when they're still free (stable origin
-    // → session survives restarts); otherwise pick fresh free ports.
-    const apiPort =
-      attempt === 1 && stored.api && (await isPortFree(stored.api))
-        ? stored.api
-        : await getFreePort();
-    let dashPort =
-      attempt === 1 &&
-      stored.dashboard &&
-      stored.dashboard !== apiPort &&
-      (await isPortFree(stored.dashboard))
-        ? stored.dashboard
-        : await getFreePort();
-    if (dashPort === apiPort) dashPort = await getFreePort();
+    // Attempt 1 reuses last run's ports when it can (stable origin → the session
+    // survives a restart); a retry means a chosen port raced away, so it asks for
+    // fresh ones rather than the pair that just failed.
+    //
+    // `resolvePortPair` is the SAME resolver the CLI installs with (@repo/core/ports).
+    // This used to be a local `isPortFree() ? stored : getFreePort()`, which had no
+    // grace period: on a restart the app probes the remembered port while its own
+    // dying process still holds it, so it moved to a brand-new port and — cookies
+    // being bound to `localhost:<port>` — logged the user out on every restart.
+    // The shared resolver waits briefly for our own process to release it first.
+    //
+    // NO `defaults` on purpose: a packaged app must never land on 4000/3001, where
+    // a dev server lives. Without them the resolver hands out ephemeral ports,
+    // which is what this launcher has always wanted.
+    const { api: apiPort, dashboard: dashPort } = await resolvePortPair(
+      attempt === 1 ? { stored } : {},
+    );
 
     // Use 127.0.0.1, not localhost: the API/dashboard bind IPv4 loopback only
     // (OPENSHIP_API_HOST=127.0.0.1), and clients that resolve `localhost` → ::1
@@ -375,6 +362,10 @@ export async function startLocalServices(internalToken: string): Promise<void> {
       // actually there, so a stale/partial Resources dir falls back to geo-ip's
       // own download path instead of pinning a bad override.
       ...(existsSync(geoipDb) ? { OPENSHIP_GEOIP_DB: geoipDb } : {}),
+      // Pin the mail-server install source to the staged engine tree. Gated on
+      // existsSync so a stale/partial Resources dir falls back to the resolver's
+      // default rather than pinning a path that definitely isn't there.
+      ...(existsSync(engineDir) ? { MAIL_SERVER_ENGINE_DIR: engineDir } : {}),
       // The dashboard + API run on dynamic ports not in the API's static origin
       // table — trust both loopback spellings of each explicitly so CORS /
       // origin-guard / auth accept them regardless of which a client resolves.

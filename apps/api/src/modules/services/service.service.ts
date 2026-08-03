@@ -2,8 +2,8 @@
  * Service business logic - CRUD and compose sync.
  */
 
-import { normalizeRoutingFields, repos, composeSpecDiff, type Service, type ServicePublicEndpoint } from "@repo/db";
-import { ForbiddenError, isValidCustomHostname, ValidationError, withTimeout, type ServiceContainerState } from "@repo/core";
+import { normalizeRoutingFields, repos, composeSpecDiff, type Project, type Service, type ServicePublicEndpoint } from "@repo/db";
+import { ForbiddenError, getProjectType, isValidCustomHostname, ValidationError, withTimeout, type ComposeAdvanced, type ServiceContainerState, type StackId } from "@repo/core";
 import {
   BuildLogger,
   DockerRuntime,
@@ -13,6 +13,7 @@ import {
 } from "@repo/adapters";
 import { scopedVolumeName, type CommandExecutor } from "@repo/adapters";
 import { encrypt, decrypt } from "../../lib/encryption";
+import { ENV_MASK, hasMaskedValue, maskDriftChanges, maskServiceEnv, unmaskEnv } from "../../lib/secret-env";
 import { assertResourceInOrg, platform } from "../../lib/controller-helpers";
 import type { RequestContext } from "../../lib/request-context";
 import {
@@ -30,8 +31,11 @@ import { parseVolumeSpec, type VolumeKind } from "./volume-spec";
 import { sq } from "../migration/direct-transfer";
 import { bounded, duBytes, volumeBytes } from "../migration/migration-size";
 import { deployComposeServices } from "../deployments/compose/deploy.service";
+import { deriveProjectRouteState } from "../domains/project-route.service";
+import { registerStartupHook } from "../../lib/startup";
 import { buildServiceRouteDomains, serviceCustomHostnames } from "../../lib/routing-domains";
 import { resolveServicePublicEndpoints } from "../../lib/public-endpoints";
+import { resolveRuntimeResources } from "../../lib/resources";
 import { assertFreeEndpointsAllowed } from "../../lib/free-domain-guard";
 import { ensurePendingServiceDomain, removeServiceDomain, reuseServerCertForDomain } from "../domains/domain.service";
 import { buildUpstreamUrl, resolveRouteStrategy } from "../../lib/upstream-url";
@@ -114,15 +118,51 @@ function normalizeRoutingPatch(input: Parameters<typeof normalizeRoutingFields>[
 // ─── Drift (compose reconciliation) ────────────────────────────────────────
 
 /**
- * Attach a computed `drift` field: the base→upstream field diff when the repo
- * compose changed a value the user had edited (`driftSpec` set by
- * reconcileFromCompose). `null` when there's nothing pending review.
+ * Present a service row to the client: attach a computed `drift` field and mask
+ * the compose `environment` map (#336). `drift` is the base→upstream field diff
+ * when the repo compose changed a value the user had edited (`driftSpec` set by
+ * reconcileFromCompose), `null` when there's nothing pending review.
+ *
+ * Masking is OUTPUT-ONLY — the stored row keeps the real values (the deploy
+ * pipeline injects them). The env map here becomes all-`••••••••`; operators
+ * reveal real values on demand via the write-gated reveal endpoint, and writes
+ * treat the sentinel as "keep stored" (see secret-env.ts). The drift diff's
+ * `environment` from/to are masked too so the reconcile UI can't leak them.
  */
+/**
+ * Merge an incoming `advanced` patch onto what's stored, so a caller that mentions
+ * one key can't erase the others.
+ *
+ * Semantics, mirroring how a JSON-merge patch behaves:
+ *   key absent  → leave the stored value alone
+ *   key = null  → remove it
+ *   key present → replace that key outright (shallow — see the call site)
+ *
+ * Exported for tests: this is the only thing standing between a partial PATCH and
+ * a silently-wiped readiness gate.
+ */
+export function mergeAdvanced(
+  stored: ComposeAdvanced | null | undefined,
+  incoming: unknown,
+): ComposeAdvanced {
+  const base: ComposeAdvanced = { ...(stored ?? {}) };
+  // A non-object (or explicit null) `advanced` means "clear it" — the one way to
+  // reset the whole blob, kept because that used to be the only behaviour.
+  if (incoming === null || typeof incoming !== "object" || Array.isArray(incoming)) {
+    return incoming === undefined ? base : {};
+  }
+  for (const [key, value] of Object.entries(incoming as Record<string, unknown>)) {
+    if (value === null) delete (base as Record<string, unknown>)[key];
+    else if (value !== undefined) (base as Record<string, unknown>)[key] = value;
+  }
+  return base;
+}
+
 function withDrift(svc: Service) {
   return {
-    ...svc,
+    ...maskServiceEnv(svc),
     drift: svc.driftSpec
-      ? { changes: composeSpecDiff(svc.importedSpec ?? {}, svc.driftSpec) }
+      ? { changes: maskDriftChanges(composeSpecDiff(svc.importedSpec ?? {}, svc.driftSpec)) }
       : null,
   };
 }
@@ -142,6 +182,21 @@ export async function getService(
 ) {
   const { svc } = await assertServiceAccess(ctx, projectId, serviceId);
   return withDrift(svc);
+}
+
+/**
+ * #336: return a service's REAL (unmasked) compose `environment`. This is the
+ * write-gated reveal that backs the "show values" toggle — the route tag is
+ * `project:service:write`, so a read-only caller can never reach the plaintext
+ * (the whole point: read = masked). `getService` above always masks.
+ */
+export async function revealServiceEnv(
+  ctx: RequestContext,
+  projectId: string,
+  serviceId: string,
+): Promise<Record<string, string>> {
+  const { svc } = await assertServiceAccess(ctx, projectId, serviceId);
+  return (svc.environment as Record<string, string> | null) ?? {};
 }
 
 /**
@@ -193,6 +248,95 @@ export async function keepServiceDrift(
 
 // ─── Create / Update ─────────────────────────────────────────────────────────
 
+/**
+ * #231: An app-framework project's own app is NOT a `service` row. The compose
+ * deploy fans out over service rows, so the moment a sidecar (Postgres/Redis/…)
+ * is added the deploy runs ONLY the sidecars and the app disappears — while still
+ * reporting "ready". Materialize the app as a `monorepo` service row so the single
+ * compose pipeline deploys app + sidecars together.
+ *
+ * The row carries NULL build fields → they fall back to the project snapshot in
+ * compose/build.service.ts, so it builds identically to the single-app path — and
+ * it mirrors the project's unified port→domain route (exposedPort + the project's
+ * public endpoints). Idempotent, and guarded to a real app-framework SERVER
+ * project's first compose sidecar; genuine docker-compose / services / monorepo
+ * projects and static/no-server apps are left alone.
+ */
+async function materializeAppServiceRow(project: Project): Promise<void> {
+  if (!project.hasServer) return; // no long-running app container to keep
+  // A catalog / self-managed app (appTemplateId set — e.g. the control plane's
+  // own "openship" project) is NOT a source-built single app: its real units are
+  // the compose rows linked by the app/self-app installer, never a slug-named
+  // `monorepo` row. Materializing one here seeds a PHANTOM public service that no
+  // container ever matches (shows perpetually "Stopped") with an unwanted
+  // {slug}-{slug} free-subdomain route. Leave these projects to their linker.
+  if (project.appTemplateId) return;
+  let projectType: string;
+  try {
+    projectType = getProjectType((project.framework ?? "") as StackId);
+  } catch {
+    return; // unknown framework → leave shape resolution to the existing paths
+  }
+  if (projectType !== "app") return; // services / docker-compose / monorepo already multi-unit
+
+  const rows = await repos.service.listByProject(project.id);
+  const hasSidecar = rows.some((s) => s.kind === "compose");
+  const hasAppRow = rows.some((s) => s.kind === "monorepo");
+  // Nothing to pair the app with, or the app row already exists. Idempotent, so
+  // it is safe to call on every sidecar add AND from the boot backfill.
+  if (!hasSidecar || hasAppRow) return;
+
+  const projectDomains = await repos.domain.listByProject(project.id).catch(() => []);
+  const routeState = deriveProjectRouteState(project, { projectDomains });
+  // Reuse the SAME normalizer createService uses so the mirrored project route
+  // lands as ServicePublicEndpoint[] (exposed/exposedPort/domain scalars + the
+  // per-port endpoints), keeping the unified port→domain mapping.
+  const routing = normalizeRoutingPatch({
+    exposed: true,
+    exposedPort: project.port != null ? String(project.port) : null,
+    publicEndpoints: routeState.publicEndpoints,
+  });
+
+  await repos.service.create({
+    projectId: project.id,
+    name: project.slug,
+    kind: "monorepo",
+    rootDirectory: project.rootDirectory ?? ".",
+    enabled: true,
+    sortOrder: -1, // app first in the fan-out
+    ...routing,
+    // build fields left undefined → project-snapshot fallback (identical single-app
+    // build). Persistent storage inherits the same way (see appRowVolumes in
+    // compose/deploy.service.ts), so editing it on the project keeps reaching the
+    // app after a sidecar is added — copying it here would freeze it instead.
+  });
+}
+
+/**
+ * #231 backfill: app-framework projects that gained sidecars BEFORE the
+ * materialization above shipped have a compose row but no app row, so their
+ * deploy drops the app. Run the same (idempotent) materialization once per boot
+ * for every project — the helper no-ops unless the project has a sidecar and no
+ * app row. Self-hosted + desktop only (the whole startup module is a no-op under
+ * CLOUD_MODE).
+ */
+export function registerAppServiceMaterializeBackfill(): void {
+  registerStartupHook({
+    id: "services:materialize-app-backfill",
+    modes: ["selfhosted", "desktop"],
+    run: async () => {
+      const projects = await repos.project.listAllForScan().catch(() => []);
+      for (const project of projects) {
+        await materializeAppServiceRow(project).catch((err) =>
+          console.warn(
+            `[services] app-materialize backfill skipped for ${project.id}: ${(err as Error).message}`,
+          ),
+        );
+      }
+    },
+  });
+}
+
 export async function createService(
   ctx: RequestContext,
   projectId: string,
@@ -209,6 +353,16 @@ export async function createService(
   const existing = await repos.service.findByName(projectId, name);
   if (existing) {
     throw new Error("service-name-already-exists");
+  }
+
+  // #336: a brand-new service has no stored env to restore from, so any masked
+  // sentinel the client sent is dropped (never persist "••••••••"). Warn so a
+  // real value accidentally lost this way is traceable.
+  if (data.environment && hasMaskedValue(data.environment)) {
+    console.warn(
+      `[services] create "${name}": dropping masked env value(s) with no stored source`,
+    );
+    data = { ...data, environment: unmaskEnv(data.environment, null) };
   }
 
   // Discriminator default: compose. Matches the DB column default.
@@ -254,8 +408,12 @@ export async function createService(
     environment: data.environment ?? {},
     volumes: data.volumes ?? [],
     command: trimOrNull(data.command),
+    commandArgv: data.commandArgv ?? null, // #332
     restart: data.restart ?? "unless-stopped",
-    advanced: data.advanced ?? {},
+    // Through mergeAdvanced even on CREATE: there is nothing to preserve, but it
+    // strips the `null`-means-remove sentinels the update path accepts, so a
+    // caller can send one payload shape to both.
+    advanced: mergeAdvanced(null, data.advanced),
     ...routing,
     enabled: data.enabled ?? true,
     sortOrder: data.sortOrder ?? services.length,
@@ -278,7 +436,15 @@ export async function createService(
     await ensurePendingServiceDomain({ projectId, serviceId: created.id, hostname });
   }
 
-  return created;
+  // #231: keep the app deployable once it gains a compose sidecar (see helper).
+  // Best-effort — a failure here must never block adding the service.
+  if (kind === "compose") {
+    await materializeAppServiceRow(project).catch((err) =>
+      console.warn(`[services] app materialization skipped: ${(err as Error).message}`),
+    );
+  }
+
+  return maskServiceEnv(created);
 }
 
 export async function updateService(
@@ -292,6 +458,32 @@ export async function updateService(
   // Normalize routing: when exposed is turned off, clear routing fields.
   // When domainType changes, clear the irrelevant domain field.
   const patch: Record<string, any> = { ...data };
+
+  // #336: env values are masked on read. Restore any sentinel the client echoed
+  // back to the stored value so editing an unrelated field never overwrites a
+  // secret with "••••••••". A real (revealed-and-changed) value passes through.
+  if ("environment" in patch) {
+    patch.environment = unmaskEnv(
+      patch.environment,
+      svc.environment as Record<string, string> | null,
+    );
+  }
+
+  // `advanced` is ONE blob holding independent, separately-owned keys —
+  // `healthcheck` (edited in the service form), `readiness` (the deploy gate),
+  // `files` (written by an app template at install), `resources` (per-service
+  // caps). Writing `data.advanced` straight through replaced the whole thing, so
+  // any partial caller silently dropped every key it didn't mention. That is not
+  // hypothetical: this route is MCP-exposed, so an agent setting a healthcheck
+  // would erase the readiness gate — quietly changing whether deploys can fail —
+  // along with an app template's generated config files.
+  //
+  // Same shape of fix as `environment` above: merge against what's stored, and
+  // make removal explicit. Shallow by design — the keys are independent, and a
+  // deep merge would make a partially-specified healthcheck inherit stale fields.
+  if ("advanced" in patch) {
+    patch.advanced = mergeAdvanced(svc.advanced as ComposeAdvanced | null, patch.advanced);
+  }
 
   if ("name" in patch && typeof patch.name === "string") {
     const name = patch.name.trim();
@@ -502,7 +694,7 @@ export async function updateService(
     }
   }
 
-  return updated;
+  return maskServiceEnv(updated);
 }
 
 /** Best-effort runtime/route teardown is bounded so a slow or unreachable box
@@ -640,7 +832,7 @@ export async function listServiceEnvVars(
   // Decrypt and mask secrets
   return vars.map((v) => ({
     ...v,
-    value: v.isSecret ? "••••••••" : decrypt(v.value),
+    value: v.isSecret ? ENV_MASK : decrypt(v.value),
   }));
 }
 
@@ -688,7 +880,22 @@ export async function syncComposeServices(
 ) {
   const project = await repos.project.findById(projectId);
   assertResourceInOrg(project, "Project", ctx.organizationId, projectId);
-  return repos.service.syncFromCompose(projectId, parsed);
+
+  // #336: env is masked on read, so the client may echo the mask sentinel back.
+  // Restore each service's masked values from its stored row (matched by name)
+  // before persisting, so a sync never overwrites a secret with "••••••••".
+  const stored = await repos.service.listByProject(projectId);
+  const storedEnvByName = new Map(
+    stored.map((s) => [s.name, (s.environment as Record<string, string> | null) ?? {}]),
+  );
+  const reconciled = parsed.map((svc) =>
+    svc.environment
+      ? { ...svc, environment: unmaskEnv(svc.environment, storedEnvByName.get(svc.name) ?? null) }
+      : svc,
+  );
+
+  const synced = await repos.service.syncFromCompose(projectId, reconciled);
+  return synced.map(maskServiceEnv);
 }
 
 // ─── Service Deployments (per-deployment state) ──────────────────────────────
@@ -1200,6 +1407,12 @@ async function provisionServiceContainer(
   });
   try {
     const result = await deployComposeServices(project, dep, runtime, logger, {
+      // The project's own caps. Omitting this fell back to the cloud free tier
+      // inside createServiceDeployConfig, so adding/starting a single service
+      // always produced a 512 MB container no matter what the project was set to.
+      resources: resolveRuntimeResources(project.resources as Record<string, unknown> | null, {
+        isCloud: resolved.effectiveTarget === "cloud",
+      }),
       // Strictly scope to THIS service: carry live siblings forward as-is, but
       // never (re)deploy or reap a service we weren't asked to touch. Without
       // this, provisioning one service could re-deploy a freshly-added sibling
@@ -1214,7 +1427,12 @@ async function provisionServiceContainer(
       usesManagedRouting: resolved.usesManagedRouting,
       serverId: resolved.serverId ?? undefined,
     });
-    if (result.status === "failed") {
+    const svc = result.services.find((s) => s.serviceId === serviceId);
+    // THIS service's own outcome decides, not the batch's: strict scope carries
+    // live siblings forward as successes, so an overall "ready" says nothing
+    // about the one service we were asked to start (its container may have
+    // crash-looped through the stabilization watch).
+    if (result.status === "failed" || svc?.status === "failed") {
       // A source-built service has no image to launch on the decoupled path
       // (it only builds through the deploy pipeline) — steer to Redeploy.
       if (service.build && !service.image) {
@@ -1222,9 +1440,8 @@ async function provisionServiceContainer(
           `"${service.name}" builds from source — use Redeploy to build and start it.`,
         );
       }
-      throw new Error(result.error ?? "Failed to start service");
+      throw new Error(svc?.error ?? result.error ?? "Failed to start service");
     }
-    const svc = result.services.find((s) => s.serviceId === serviceId);
     return { containerId: svc?.containerId ?? "", ip: svc?.ip };
   } finally {
     await runtime.dispose?.();

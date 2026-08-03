@@ -39,6 +39,24 @@ interface StackCase {
 }
 
 const POSITIVE_STACK_CASES: StackCase[] = [
+  // ── #231 regression: a backend framework shipping a Vite asset frontend must
+  //    detect as the backend, NOT as a bare Vite SPA (stock `laravel new` ships
+  //    vite.config.js + package.json and previously shadowed Laravel) ──────────
+  {
+    name: "Laravel + Vite frontend (stock `laravel new`) → laravel, not vite (#231)",
+    files: files("composer.json", "artisan", "package.json", "vite.config.js", "app/", "routes/"),
+    packageJson: { devDependencies: { vite: "^5.0.0", "laravel-vite-plugin": "^1.0.0" } },
+    // Real folder/git scans always carry composer.json content — Laravel's dep
+    // gate keys on laravel/framework. Without the Vite veto, `vite` matched first.
+    fileContents: { "composer.json": '{"require":{"laravel/framework":"^11.0","php":"^8.2"}}' },
+    expectedStack: "laravel",
+  },
+  {
+    name: "Pure Vite SPA (no backend marker) still → vite (#231 guard)",
+    files: files("package.json", "vite.config.ts", "index.html", "src/"),
+    packageJson: { devDependencies: { vite: "^5.0.0" } },
+    expectedStack: "vite",
+  },
   // ── JS/TS Frontend & Fullstack ──────────────────────────────────────────
   {
     name: "Next.js - next.config.js + next dep",
@@ -536,6 +554,36 @@ describe("detectPackageManager", () => {
 
   it("bun via newer bun.lock", () => {
     expect(detectPackageManager(files("package.json", "bun.lock"))).toBe("bun");
+  });
+
+  it("bun via bunfig.toml with no lock file", () => {
+    expect(detectPackageManager(files("package.json", "bunfig.toml"))).toBe("bun");
+  });
+
+  // bunfig.toml is a runtime/test-runner config, NOT an install marker: using
+  // `bun test` while installing with npm/yarn is its whole point. It must stay
+  // BELOW the lock files and below an explicit packageManager field — promoting it
+  // silently flips those repos to `bun install` and the oven/bun build image.
+  describe("bunfig.toml never outranks a real install marker", () => {
+    it("loses to package-lock.json", () => {
+      expect(detectPackageManager(files("package.json", "bunfig.toml", "package-lock.json"))).toBe("npm");
+    });
+
+    it("loses to yarn.lock", () => {
+      expect(detectPackageManager(files("package.json", "bunfig.toml", "yarn.lock"))).toBe("yarn");
+    });
+
+    it("loses to pnpm-lock.yaml", () => {
+      expect(detectPackageManager(files("package.json", "bunfig.toml", "pnpm-lock.yaml"))).toBe("pnpm");
+    });
+
+    it("loses to an explicit packageManager field", () => {
+      expect(
+        detectPackageManager(files("package.json", "bunfig.toml"), {
+          packageManager: "yarn@4.1.0",
+        }),
+      ).toBe("yarn");
+    });
   });
 
   it("npm via package-lock.json", () => {

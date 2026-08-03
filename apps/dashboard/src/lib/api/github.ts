@@ -54,9 +54,25 @@ function invalidateStatus(): void {
 /*  GitHub Integration API                                            */
 /* ------------------------------------------------------------------ */
 
+/** One entry in a repo's recursive path list. */
+export interface RepoTreeEntry {
+  path: string;
+  type: "file" | "dir";
+}
+
 export const githubApi = {
   /** Dashboard home - user info, orgs, recent repos */
   getUserHome: () => api.get<any>(endpoints.github.userHome),
+
+  /**
+   * A repo's whole tree, flat and recursive — one call, so the path picker can
+   * render a collapsible tree AND search it without a request per directory.
+   * Server-side it's filtered to paths the caller may themselves read.
+   */
+  getRepoTree: (owner: string, repo: string, branch?: string) =>
+    api.get<{ data: RepoTreeEntry[] }>(
+      endpoints.github.repoTree(owner, repo) + (branch ? `?branch=${encodeURIComponent(branch)}` : ""),
+    ),
 
   /** Repos for a specific GitHub org */
   getOrgRepos: (owner: string) =>
@@ -110,6 +126,17 @@ export const githubApi = {
    */
   connect: (source?: "oauth" | "cli") =>
     api.post<any>(endpoints.github.connect, source ? { source } : undefined),
+
+  /**
+   * Connect this instance with a pasted GitHub token. Validated server-side
+   * before it is stored, so a bad scope comes back as a 400 on the field rather
+   * than a broken clone mid-deploy. Self-hosted only.
+   */
+  setInstanceToken: (token: string) =>
+    api.post<{ connected: boolean; login?: string; warning?: string }>(
+      endpoints.github.instanceToken,
+      { token },
+    ),
 
   /** Poll device flow status */
   pollConnect: () => api.get<any>(endpoints.github.connectPoll),

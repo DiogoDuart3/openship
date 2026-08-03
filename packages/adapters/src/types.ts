@@ -27,19 +27,26 @@ export type AmbientGitVia = "gh" | "helper" | "ssh";
 // ─── Resource configuration ──────────────────────────────────────────────────
 
 export interface ResourceConfig {
-  /** CPU cores (fractional, e.g. 0.5, 1.0, 2.0) - the universal unit all runtimes use */
+  /** CPU cores (fractional, e.g. 0.5, 1.0, 2.0) - the universal unit all
+   *  runtimes use. `0` = NO LIMIT (see UNLIMITED_RESOURCES in @repo/core). */
   cpuCores: number;
-  /** Memory limit in megabytes */
+  /** Memory limit in megabytes. `0` = NO LIMIT. */
   memoryMb: number;
   /** Writable disk in megabytes */
   diskMb: number;
 }
 
-/** Single source of truth - production/runtime resources (the free-tier limit).
- *  Deliberately small: a runtime doesn't need build-sized resources, and cloud
- *  runtimes are shrunk to this after the build so they don't hog the pool.
- *  Matches the cloud "low" tier (cloud-resources.ts) so a tier-less / fallback
- *  deploy lands at the same 0.5 vCPU · 512 MB as an explicit free-tier pick. */
+/** CLOUD-ONLY production default (the metered free tier). Deliberately small: a
+ *  runtime doesn't need build-sized resources, and cloud runtimes are shrunk to
+ *  this after the build so they don't hog the pool. Matches the cloud "low" tier
+ *  (cloud-resources.ts) so a tier-less cloud deploy lands at the same
+ *  0.5 vCPU · 512 MB as an explicit free-tier pick.
+ *
+ *  Do NOT use this as a self-hosted fallback. A self-hosted box is the
+ *  operator's own hardware with no pool to protect, so its default is
+ *  UNLIMITED_RESOURCES — applying this tier there silently OOM-killed
+ *  memory-hungry images (ML models, headless browsers) at 512 MB. Resolve the
+ *  right default per target with `resolveRuntimeResources` (apps/api). */
 export const DEFAULT_RESOURCE_CONFIG: ResourceConfig = {
   cpuCores: 0.5,
   memoryMb: 512,
@@ -158,6 +165,28 @@ export interface BuildConfig {
    * monorepo pipeline is container-only).
    */
   isStatic?: boolean;
+  /**
+   * Static build whose output is EXTRACTED, not run.
+   *
+   * `buildStaticToHost` copies the built doc-root onto a host directory the edge
+   * serves, then discards the image — so a web-server runtime stage in that recipe
+   * is pure waste: it pulls `nginx:alpine`, runs six more build steps, and writes an
+   * nginx config nothing ever reads, all to be deleted moments later. With this set,
+   * the recipe stops at the builder and stages the output at
+   * {@link STATIC_EXTRACT_DIR}.
+   *
+   * NOT the same as plain `isStatic`. A static monorepo sub-app in a compose project
+   * (see isStaticService) really is RUN as a container and genuinely needs the nginx
+   * stage — that's why this is a separate flag rather than a change to isStatic.
+   */
+  staticExtractOnly?: boolean;
+  /**
+   * Host directory the extract-only build's files are moved to. Set together with
+   * `staticExtractOnly`; the build's `imageRef` becomes this path instead of an
+   * image tag, matching BareRuntime.build's host-dir contract so the file-backed
+   * serve path consumes it unchanged.
+   */
+  staticOutDir?: string;
   /** Environment variables injected at build time */
   envVars: Record<string, string>;
   /** Resources allocated for the build container */
@@ -245,6 +274,18 @@ export interface DeployConfig {
   restartPolicy?: "always" | "on-failure" | "no";
   /** Runtime-safe identifier used for workload/container/page naming. */
   runtimeName?: string;
+  /** Project slug — scopes named volumes to `openship-<slug>-<name>` so two
+   *  projects that pick the same volume name never share one. */
+  slug?: string;
+  /**
+   * Persistent mounts for this workload, in compose syntax
+   * (`name:/container/path`, or a host bind mount). Already resolved from the
+   * project's declaration or the stack's defaults by `resolveProjectVolumes`.
+   *
+   * Docker mounts them; bare symlinks the in-app paths into a shared directory
+   * that outlives releases; cloud has no volume primitive and warns.
+   */
+  volumes?: string[];
   /** Authoritative public route mappings for this workload. */
   publicEndpoints?: DeployPublicEndpoint[];
   /** Files/directories to copy into /app/production/ before starting the workload.
@@ -388,11 +429,42 @@ export interface RouteHeaderRule {
   headers: { key: string; value: string }[];
 }
 
+/**
+ * Canonical host redirect: this vhost answers `statusCode` → `https://<target>`
+ * plus the original path and query, instead of serving anything.
+ *
+ * Distinct from {@link RouteRedirect}, which is a per-PATH rule inside a serving
+ * vhost. This replaces the whole route: the classic `www.example.com` →
+ * `example.com` (or the reverse), and old-domain → new-domain moves.
+ */
+export interface RouteHostRedirect {
+  /** Hostname to redirect to. Validated as a domain before it's emitted. */
+  target: string;
+  /** 301 | 302 | 307 | 308. */
+  statusCode: number;
+}
+
 interface BaseRouteConfig {
   /** External domain (e.g. "my-app.example.com") */
   domain: string;
   /** Whether TLS is enabled */
   tls: boolean;
+  /**
+   * TLS for this host terminates on THIS box (we hold or will hold its cert),
+   * rather than at an upstream ingress or Openship Cloud's edge.
+   *
+   * When set, the routing provider guarantees a :443 listener for the host from
+   * the moment the route exists — serving a temporary self-signed cert until the
+   * real one is issued. Without a listener, an unmatched SNI hits the edge's
+   * `ssl_reject_handshake` default, so the origin REFUSES the handshake for a
+   * domain we route (Cloudflare reports that as error 525, and it deadlocks
+   * issuance — see #308).
+   *
+   * Left unset for `externalIngress` hosts and managed `*.opsh.io` hosts, whose
+   * TLS is someone else's: presenting a placeholder cert for those would be wrong,
+   * not merely unnecessary.
+   */
+  terminatesTlsLocally?: boolean;
   /**
    * When set, adds a `/_openship/hooks/` location that proxies
    * webhook requests to the Openship API at this URL.
@@ -408,6 +480,16 @@ interface BaseRouteConfig {
   proxyLocations?: RouteProxyLocation[];
   /** Redirect rules (vercel.json `redirects`) → `return <code> <dest>` locations. */
   redirects?: RouteRedirect[];
+  /**
+   * Serve a canonical redirect to another host INSTEAD of this route's content.
+   *
+   * Overrides the primary target and every path-scoped location: a host that
+   * redirects has no content of its own, so honouring `proxyLocations` /
+   * `redirects` / `headerRules` / `webhookProxy` alongside it would mean some
+   * paths redirect and others don't. It still needs its own certificate — a 301
+   * from `https://` only works if the TLS handshake succeeds first.
+   */
+  redirectHost?: RouteHostRedirect;
   /** Response-header rules (vercel.json `headers`) → `add_header`. */
   headerRules?: RouteHeaderRule[];
   /** Curated reverse-proxy tunables (client_max_body_size, proxy/body timeouts,
@@ -427,6 +509,20 @@ export interface StaticRouteConfig extends BaseRouteConfig {
   /** Absolute path on the target machine to serve via Nginx root. */
   staticRoot: string;
   targetUrl?: never;
+  /**
+   * This root is being ADOPTED from a proxy we're taking over, not produced by an
+   * Openship build.
+   *
+   * Openship-managed roots are confined to {@link MANAGED_STATIC_BASE}: a route we
+   * generate must never be able to publish an arbitrary host directory, so a bad or
+   * crafted value fails closed instead of serving `/etc` to the internet.
+   *
+   * Adoption is the one legitimate exception — an imported vhost's root (e.g.
+   * `/var/www/site`) is a path the operator's own nginx is ALREADY serving publicly,
+   * and refusing it would break proxy migration. Opt-in and named so it can only be
+   * used deliberately, never reached by a caller that forgot the base.
+   */
+  staticRootAdopted?: boolean;
 }
 
 export type RouteConfig = ProxyRouteConfig | StaticRouteConfig;
@@ -451,7 +547,21 @@ export interface SslResult {
    * downgrading a healthy `active` domain to `provisioning`.
    */
   verified: boolean;
-  reason?: "issued" | "renewed" | "missing" | "read_error";
+  /**
+   * `not_local` means no certificate was issued here BY DESIGN — TLS for this
+   * hostname is terminated or supplied elsewhere (an upstream ingress, the managed
+   * `*.opsh.io` edge, an operator-uploaded cert). Distinct from `missing`, which
+   * means a cert was expected and isn't there: persisting `not_local` as
+   * "provisioning" would overwrite a correct `external` status with a lie.
+   */
+  /**
+   * `invalid` means a certificate IS on disk but can't be served for this
+   * hostname — expired, a key that doesn't open it, or issued for other names.
+   * Distinct from `missing` (nothing there) and `read_error` (transient): the file
+   * exists, so a retry won't help, and treating it as valid is what let "Recheck
+   * SSL" report green on a cert browsers reject.
+   */
+  reason?: "issued" | "renewed" | "missing" | "read_error" | "not_local" | "invalid";
 }
 
 // ─── Log streaming callback ──────────────────────────────────────────────────
@@ -538,6 +648,22 @@ export interface CommandExecutor {
 
   /** Remove a file or directory recursively. Silently succeeds if already gone. */
   rm(path: string): Promise<void>;
+
+  /**
+   * Rename within the same filesystem — a FILE operation, not a command.
+   *
+   * It exists because expressing it as `exec("mv a b")` is wrong on a decorated
+   * executor: `edgeContainerExecutor` runs commands INSIDE the edge container while
+   * file ops land on the HOST, so nginx's atomic vhost write (write temp → mv into
+   * place) renamed a path the container cannot see and failed with ENOENT on a file
+   * that had just been written successfully. Routing a rename through the file
+   * channel keeps it in the same namespace as the write.
+   *
+   * Optional: callers must fall back to a shell `mv` when an executor doesn't
+   * implement it (correct for any executor whose commands and files share a
+   * namespace, which is all of the plain ones).
+   */
+  rename?(from: string, to: string): Promise<void>;
 
   /**
    * Transfer a local directory into the target environment.

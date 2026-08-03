@@ -15,13 +15,14 @@ import {
   resolveServiceHostnameLabel,
   resolvePublicUrlPlaceholders,
   getAppPrepareSteps,
+  resolveProjectVolumes,
+  UNLIMITED_RESOURCES,
   type ComposeAdvanced,
 } from "@repo/core";
 import { getTemplateForOrg } from "../../apps/catalog-source";
 import { attachLinkedNetworks } from "../attach-linked-networks";
 import {
   BuildLogger,
-  DEFAULT_RESOURCE_CONFIG,
   DockerRuntime,
   allocateHostPort,
   runDeployPipeline,
@@ -46,13 +47,23 @@ import {
   buildServiceRouteDomains,
   createTrackedSslProvider,
   ensureRouteDomainRecord,
+  hostTerminatesTlsLocally,
   toRoutedDomainInputs,
   type PlannedRouteDomain,
 } from "../../../lib/routing-domains";
 import { resolveServiceEndpointUrls, resolveServicePublicEndpoints } from "../../../lib/public-endpoints";
 import { ensureManagedEdgeProxy } from "../../../lib/managed-edge-proxy";
+import { ensureRoutingReady } from "../../../lib/edge-reconcile";
 import * as sessionManager from "../session-manager";
+import { isStaticService } from "../../../lib/deployable-service";
+import { computeKeepSet } from "../image-gc";
 import { auditPorts } from "../port-audit.service";
+import {
+  recordUnstableServices,
+  verifyDeployedContainers,
+  type StabilityTarget,
+} from "../stability-audit.service";
+import { resolveReadinessGate, type ResolvedReadinessGate } from "../readiness-gate";
 import type { PortCheckResult } from "../../../lib/deployment-runtime";
 import { resolveServicePort } from "./domain-helpers";
 import { buildCompositeRegistration, buildDomainFanoutRegistrations } from "./composite-route";
@@ -82,6 +93,13 @@ export interface ComposeDeployResult {
     ip?: string;
     hostPort?: number;
     error?: string;
+    /**
+     * Host directory this service's built files live in — set INSTEAD of
+     * containerId/ip/hostPort for a self-hosted static sub-app, which the edge
+     * serves from disk rather than proxying to a container. Consumed by the
+     * composite route resolver.
+     */
+    staticRoot?: string;
   }>;
   warning?: string;
   /** Per-domain routing failures on an otherwise-successful deploy (domains are
@@ -179,6 +197,17 @@ function hostPublishedPorts(service: Service): number[] {
  */
 const APP_CONFIG_HOST_ROOT = process.env.OPENSHIP_APP_CONFIG_DIR || "/var/lib/openship/app-config";
 
+/**
+ * Wall-clock ceiling for the whole advisory port audit of a stack.
+ *
+ * The audit is always-on (it's the source of the dashboard's "is that the right
+ * port?" hint), so unlike the opt-in readiness gate it can't be turned off — which
+ * means it must be bounded. Mirrors `PORT_CHECK_BUDGET_MS` in
+ * projects/port-check.service.ts, which bounds the same probe for the same reason:
+ * past the budget, degrade to no hint, never to a stalled deploy.
+ */
+const PORT_AUDIT_BUDGET_MS = 8000;
+
 function appConfigHostPath(projectId: string, serviceName: string, containerPath: string): string {
   const safeSvc = serviceName.replace(/[^a-zA-Z0-9._-]/g, "_");
   const rel = containerPath.replace(/^\/+/, "");
@@ -246,6 +275,53 @@ function createServicePipelineLogger(
   });
 }
 
+/**
+ * Persistent mounts for one row in the fan-out.
+ *
+ * A row's own `volumes` always wins. The fallback covers ONE case: the #231
+ * materialized app row — the single app's own service row, created when the
+ * project gained its first sidecar. Its build fields deliberately inherit from
+ * the project snapshot rather than being copied, and storage inherits the same
+ * way, so the project's "persistent storage" setting keeps reaching the app
+ * after a sidecar is added instead of freezing at whatever it was that day.
+ *
+ * Deliberately keyed on the app row (a `monorepo` row named after the project)
+ * and not on every inheriting row: a real monorepo's sub-apps would otherwise
+ * all mount the SAME volume at the same path.
+ */
+function appRowVolumes(project: Project, service: Service): string[] {
+  const own = (service.volumes as string[] | null) ?? [];
+  if (own.length > 0) return own;
+  const isAppRow = serviceKind(service) === "monorepo" && service.name === project.slug;
+  if (!isAppRow) return [];
+  return resolveProjectVolumes(project.volumes as string[] | null, project.framework);
+}
+
+/**
+ * Effective caps for ONE service: its own compose-authored limits override the
+ * project-wide config field by field, so a service that declares only
+ * `mem_limit` keeps the project's CPU setting.
+ *
+ * Before this, an uploaded compose file's `mem_limit` / `deploy.resources.limits`
+ * were parsed nowhere and silently discarded — a service asking for 4 GB got
+ * whatever the project was set to.
+ */
+function resolveServiceResources(
+  service: Service,
+  projectResources: ResourceConfig | undefined,
+): ResourceConfig | undefined {
+  const own = (service.advanced as ComposeAdvanced | null)?.resources;
+  if (!own || (own.cpuCores === undefined && own.memoryMb === undefined)) {
+    return projectResources;
+  }
+  const base = projectResources ?? UNLIMITED_RESOURCES;
+  return {
+    cpuCores: own.cpuCores ?? base.cpuCores,
+    memoryMb: own.memoryMb ?? base.memoryMb,
+    diskMb: base.diskMb,
+  };
+}
+
 function createServiceRuntimeConfig(opts: {
   project: Project;
   dep: Deployment;
@@ -263,6 +339,12 @@ function createServiceRuntimeConfig(opts: {
   // monorepo → startCommand (with command fallback if missing), compose →
   // command. No branching on kind needed.
   const runtimeCommand = service.startCommand ?? service.command ?? undefined;
+  // #332: pass the structured argv for a compose `command` (docker-compose Cmd,
+  // no `sh -c`). Only for compose rows — a monorepo sub-app's `startCommand` is a
+  // shell string, so force null there to keep the legacy `sh -c` shell behavior.
+  const commandArgv = service.startCommand
+    ? null
+    : ((service.commandArgv as string[] | null) ?? null);
   return {
     deploymentId: dep.id,
     projectId: project.id,
@@ -271,9 +353,10 @@ function createServiceRuntimeConfig(opts: {
     image,
     ports: (service.ports as string[]) ?? [],
     environment,
-    volumes: (service.volumes as string[]) ?? [],
+    volumes: appRowVolumes(project, service),
     namespaceVolumes: service.namespaceVolumes,
     command: runtimeCommand,
+    commandArgv,
     restart: service.restart ?? "unless-stopped",
     // "update" trigger → force a fresh pull so a moved mutable tag (:latest/:1)
     // actually rolls forward. Every other trigger stays pull-if-missing.
@@ -321,7 +404,11 @@ function createServiceDeployConfig(opts: {
     startCommand,
     stack,
     envVars: environment,
-    resources: resources ?? DEFAULT_RESOURCE_CONFIG,
+    // No fallback tier. An absent config means "no limit" (the runtime omits
+    // Memory/NanoCpus entirely) — substituting the cloud free tier here is what
+    // capped every compose container at 512 MB regardless of project settings.
+    // Cloud callers resolve a concrete tier before reaching this function.
+    resources: resources ?? UNLIMITED_RESOURCES,
     restartPolicy: toDeployRestartPolicy(service.restart ?? undefined),
     runtimeName: publicSlug ?? `${project.slug}-${service.name}`,
     publicEndpoints: servicePublicEndpoints.length > 0 ? servicePublicEndpoints : undefined,
@@ -506,9 +593,19 @@ export async function deployComposeServices(
     // routing is flagged action-required and retried later.
     try {
       if (plannedRoutes.length > 0) {
-        await opts.system.ensureFeature("routing", systemLog);
+        // Components + edge convergence as ONE step — see ensureRoutingReady for why
+        // the second half can't live inside ensureFeature. Without an executor
+        // there's no box to converge (cloud), so components alone are correct.
+        if (opts.executor) {
+          await ensureRoutingReady(opts.executor, opts.system, { onLog: systemLog });
+        } else {
+          await opts.system.ensureFeature("routing", systemLog);
+        }
       }
-      if (plannedRoutes.some((route) => route.provisionSsl)) {
+      // Pending custom routes deliberately skip issuance, but their first
+      // deploy must still prepare certbot so automatic/manual verification can
+      // issue later without asking for a redeploy.
+      if (plannedRoutes.some((route) => route.requiresSslTooling)) {
         await opts.system.ensureFeature("ssl", systemLog);
       }
     } catch (err) {
@@ -539,6 +636,17 @@ export async function deployComposeServices(
     : [];
   const previousByServiceId = new Map(previousServiceDeps.map((row) => [row.serviceId, row]));
   const enabledServiceIds = new Set(enabled.map((svc) => svc.id));
+
+  // Images every retained release still needs (active + pinned + the newest
+  // `rollbackWindow` deployments, per service). Loaded lazily and ONCE per
+  // deploy — it's only consulted when a service actually supersedes an image,
+  // and the same keep set the image GC and retention prune use, so "what is
+  // still restorable" has exactly one definition.
+  let keepSetPromise: Promise<Set<string>> | null = null;
+  const retentionKeepSet = () => {
+    keepSetPromise ??= computeKeepSet(project).catch(() => new Set<string>());
+    return keepSetPromise;
+  };
 
   // Full/forceAll deploy (no explicit target subset) churn-avoidance: an
   // image-only (external) service that hasn't changed since the active
@@ -580,7 +688,7 @@ export async function deployComposeServices(
     // Reuses the map built above (needsDomainMap covers this branch).
     routeContext = {
       routing: opts.routing,
-      trackedSsl: createTrackedSslProvider(opts.ssl, domainByHostname),
+      trackedSsl: createTrackedSslProvider(opts.ssl, domainByHostname, (m) => logger.log(`${m}\n`)),
       usesManagedRouting: opts.usesManagedRouting,
       organizationId: dep.organizationId,
       serverId: opts.serverId,
@@ -591,6 +699,21 @@ export async function deployComposeServices(
 
   const results: ComposeDeployResult["services"] = [];
   const portChecks: PortCheckResult[] = [];
+  /** Exposed services to port-probe, collected in the deploy loop and run together
+   *  after it (see the concurrent audit below). */
+  const portAuditTargets: Array<{
+    containerId: string;
+    port: number;
+    serviceId?: string;
+    serviceName: string;
+  }> = [];
+  // Containers THIS deploy created, watched for stability once the whole stack
+  // is up. Carried-forward and static services are deliberately absent: a
+  // pre-existing container's health isn't this deploy's verdict to give.
+  const stabilityTargets: StabilityTarget[] = [];
+  /** serviceId → its EFFECTIVE readiness gate (own `advanced.readiness`, else the
+   *  project's). Filled as each service starts; read by the watch below. */
+  const readinessByServiceId = new Map<string, ResolvedReadinessGate>();
   // Per-domain routing failures across all services (domains are optional —
   // never fatal). Aggregated into the deployment's routing action-required signal.
   const composeRouteWarnings: string[] = [];
@@ -759,6 +882,7 @@ export async function deployComposeServices(
       await repos.service.createServiceDeployment({
         deploymentId: dep.id,
         serviceId: svc.id,
+        serviceName: svc.name,
         status: "failure",
         imageRef: opts?.builtImages?.get(svc.id) ?? svc.image ?? null,
       });
@@ -810,6 +934,7 @@ export async function deployComposeServices(
       await repos.service.createServiceDeployment({
         deploymentId: dep.id,
         serviceId: svc.id,
+        serviceName: svc.name,
         status: "failure",
         imageRef: svc.image ?? null,
       });
@@ -844,6 +969,7 @@ export async function deployComposeServices(
       await repos.service.createServiceDeployment({
         deploymentId: dep.id,
         serviceId: svc.id,
+        serviceName: svc.name,
         status: "failure",
       });
       results.push({
@@ -853,6 +979,80 @@ export async function deployComposeServices(
         error: message,
       });
       unavailableServiceNames.add(svc.name);
+      continue;
+    }
+
+    // ── Static sub-app: files on the host, served by the edge ──────────────
+    // `image` is a DIRECTORY here, not a tag — the batch builder extracted the
+    // build output (staticExtractOnly). There is no container to create, no port
+    // to publish and no health check to run: the edge serves the files with
+    // `root`. This replaces containerizing an nginx image whose only job was to
+    // hand the same files to the edge one hop later.
+    //
+    // Cloud never reaches this branch: `staticExtractOnly` isn't set there (no host
+    // directory to serve), so `image` is a tag and the service deploys as a proxied
+    // container exactly as before.
+    if (isStaticService(svc) && image.startsWith("/")) {
+      sessionManager.broadcastServiceStatus(dep.id, {
+        serviceName: svc.name,
+        serviceId: svc.id,
+        status: "deploying",
+      });
+      logger.log(`Serving static files for "${svc.name}" from ${image}\n`, "info", {
+        serviceName: svc.name,
+      });
+
+      // Per-service routes point at the DIRECTORY. Best-effort, matching the rest
+      // of routing: a registration failure never fails the deploy.
+      if (routeContext?.routing) {
+        const { routes: staticRoutes } = await prepareServiceRoutes({
+          project,
+          service: svc,
+          runtimeName: runtime.name,
+          routeContext,
+          logger,
+        });
+        for (const route of staticRoutes) {
+          const routeKey = route.hostname.toLowerCase();
+          if (seenRouteDomains.has(routeKey)) continue;
+          seenRouteDomains.add(routeKey);
+          await routeContext.routing
+            .registerRoute({
+              domain: route.hostname,
+              staticRoot: image,
+              tls: true,
+              terminatesTlsLocally: hostTerminatesTlsLocally(
+                route.hostname,
+                routeContext.domainByHostname.get(routeKey),
+              ),
+            })
+            .catch((err) => {
+              composeRouteWarnings.push(
+                `${route.hostname}: ${err instanceof Error ? err.message : "route registration failed"}`,
+              );
+            });
+        }
+      }
+
+      await repos.service.createServiceDeployment({
+        deploymentId: dep.id,
+        serviceId: svc.id,
+        serviceName: svc.name,
+        status: "success",
+        imageRef: image,
+      });
+      results.push({
+        serviceId: svc.id,
+        serviceName: svc.name,
+        status: "running",
+        staticRoot: image,
+      });
+      successful += 1;
+      sessionManager.broadcastServiceStatus(dep.id, {
+        serviceName: svc.name,
+        serviceId: svc.id,
+        status: "running",
+      });
       continue;
     }
 
@@ -887,7 +1087,7 @@ export async function deployComposeServices(
       service: svc,
       image,
       environment: mergedEnv,
-      resources: opts?.resources,
+      resources: resolveServiceResources(svc, opts?.resources),
       // Cloud stores the workspace id as the service's containerId. Reuse the
       // previous deployment's workspace so its disk (volume data) survives the
       // redeploy. Only meaningful on cloud; docker recreates containers.
@@ -935,7 +1135,7 @@ export async function deployComposeServices(
       service: svc,
       image,
       environment: mergedEnv,
-      resources: opts?.resources,
+      resources: resolveServiceResources(svc, opts?.resources),
       buildSessionId: opts?.buildSessionId,
     });
     const { routes: preparedRoutes, warnings: routeClaimWarnings } = await prepareServiceRoutes({
@@ -1116,6 +1316,7 @@ export async function deployComposeServices(
         await repos.service.createServiceDeployment({
           deploymentId: dep.id,
           serviceId: svc.id,
+          serviceName: svc.name,
           containerId: result.containerId,
           status: "success",
           imageRef: image,
@@ -1134,6 +1335,23 @@ export async function deployComposeServices(
         hostPort: persistedHostPort ?? undefined,
       });
       successful += 1;
+      if (result.containerId) {
+        stabilityTargets.push({
+          serviceId: svc.id,
+          serviceName: svc.name,
+          containerId: result.containerId,
+          startedAtMs: Date.now(),
+        });
+        // Effective gate for THIS service: its own `advanced.readiness` when it
+        // declares one, else the project's. Captured here because `svc.advanced` is
+        // in hand; the watch itself runs after the whole stack is up.
+        readinessByServiceId.set(
+          svc.id,
+          resolveReadinessGate(
+            (svc.advanced as ComposeAdvanced | null)?.readiness ?? project.readiness,
+          ),
+        );
+      }
 
       // Broadcast per-service "running" status to SSE subscribers
       sessionManager.broadcastServiceStatus(dep.id, {
@@ -1144,30 +1362,52 @@ export async function deployComposeServices(
         hostPort: persistedHostPort ?? undefined,
       });
 
-      logger.log(`Service "${svc.name}" deployed successfully.\n`, "info", {
+      // "Started" — not yet "stayed up". The stabilization watch after the loop
+      // is what can still demote this to failed.
+      logger.log(`Service "${svc.name}" started.\n`, "info", {
         serviceName: svc.name,
       });
 
       // Advisory: confirm an exposed service is actually listening on its public
-      // port, probed from inside its container/workspace. Never throws; only
-      // exposed services with a resolvable public port are probed + recorded.
+      // port. Only COLLECTED here — the probes run together after the loop, since
+      // each one can wait up to PORT_AUDIT_TIMEOUT_MS for a port that will never
+      // come up, and probing them one-at-a-time inside the loop made a stack of N
+      // wrong-port services cost N × that window on the deploy's critical path.
       const auditPort = resolveServicePublicPort(svc);
       if (auditPort !== undefined && result.containerId) {
-        const [pc] = await auditPorts(runtime, result.containerId, [auditPort], logger);
-        if (pc) portChecks.push({ ...pc, serviceId: svc.id, serviceName: svc.name });
+        portAuditTargets.push({
+          containerId: result.containerId,
+          port: auditPort,
+          serviceId: svc.id,
+          serviceName: svc.name,
+        });
       }
 
+      // Reclaim the image this service just moved off — UNLESS it's still in the
+      // retention keep set. A rollback restore re-deploys a past release's own
+      // tag, so two deployment rows legitimately reference one image; removing
+      // "the previous one" then deletes an image another retained release (or the
+      // one we just restored FROM, if the user rolls forward again) still needs.
       if (previous?.imageRef && previous.imageRef !== image && runtime instanceof DockerRuntime) {
-        await runtime.removeImage(previous.imageRef).catch((err) => {
-          const message = err instanceof Error ? err.message : "Unknown error";
+        const keep = await retentionKeepSet();
+        if (keep.has(previous.imageRef)) {
           logger.log(
-            `Warning: failed to remove previous image for "${svc.name}": ${message}\n`,
-            "warn",
-            {
-              serviceName: svc.name,
-            },
+            `Keeping previous image for "${svc.name}" — still within the rollback window.\n`,
+            "info",
+            { serviceName: svc.name },
           );
-        });
+        } else {
+          await runtime.removeImage(previous.imageRef).catch((err) => {
+            const message = err instanceof Error ? err.message : "Unknown error";
+            logger.log(
+              `Warning: failed to remove previous image for "${svc.name}": ${message}\n`,
+              "warn",
+              {
+                serviceName: svc.name,
+              },
+            );
+          });
+        }
       }
 
       // Sync the managed edge proxy for EACH free .opsh.io route (a multi-port
@@ -1229,6 +1469,7 @@ export async function deployComposeServices(
         await repos.service.createServiceDeployment({
           deploymentId: dep.id,
           serviceId: svc.id,
+          serviceName: svc.name,
           containerId: deployedContainerId,
           status: "indeterminate",
           imageRef: image,
@@ -1269,6 +1510,7 @@ export async function deployComposeServices(
         await repos.service.createServiceDeployment({
           deploymentId: dep.id,
           serviceId: svc.id,
+          serviceName: svc.name,
           status: "failure",
           imageRef: image,
         });
@@ -1284,11 +1526,120 @@ export async function deployComposeServices(
     }
   }
 
+  // ── Advisory port audit, all services at once ──────────────────────────────
+  // Concurrent + budget-capped, because this is the one post-start wait that is
+  // NOT opt-in: it's how the dashboard learns to offer "is that the right port?",
+  // so it stays on by default — but it must not be able to dominate a deploy.
+  // Sequentially inside the loop, a stack whose services never bind cost one full
+  // probe window EACH; concurrently the whole audit costs one window, and the
+  // budget caps even that. Every probe is guaranteed non-throwing (auditPorts
+  // resolves to `checked:false` rather than rejecting), so the only thing the race
+  // can lose is the hint itself — never the deploy.
+  if (portAuditTargets.length > 0) {
+    const probes = Promise.all(
+      portAuditTargets.map(async (target) => {
+        const [pc] = await auditPorts(runtime, target.containerId, [target.port], logger);
+        return pc
+          ? { ...pc, serviceId: target.serviceId, serviceName: target.serviceName }
+          : null;
+      }),
+    );
+    const audited = await Promise.race([
+      probes,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), PORT_AUDIT_BUDGET_MS)),
+    ]);
+    if (audited) {
+      for (const pc of audited) if (pc) portChecks.push(pc);
+    } else {
+      logger.log(
+        `Port check: skipped the "is that the right port?" hint for ` +
+          `${portAuditTargets.length} service(s) — the probes didn't finish within ` +
+          `${Math.round(PORT_AUDIT_BUDGET_MS / 1000)}s. The deploy is unaffected.\n`,
+        "warn",
+      );
+    }
+  }
+
   // ── Cross-project service links (internal / shared-network mode) ────────────
   // Attach this consumer's containers to each internally-linked source app's
   // `openship-<slug>` network so injected internal hosts resolve (see the shared
   // helper). Advisory — a link-networking failure never fails the deploy.
   await attachLinkedNetworks(project.id, runtime, (m, level) => logger.log(`${m}\n`, level));
+
+  // ── Stabilization: did the containers we just created STAY up? ───────────────
+  // Up to here "success" meant docker accepted the create+start call, which a
+  // container whose command dies instantly also does — and `restart: always`
+  // then hides the crash behind a bounce loop that every status read shows as
+  // "Up 1 second". So watch them for a window and demote what didn't hold.
+  //
+  // Runs HERE, after every container exists and the linked networks are
+  // attached, for a reason: a service that waits on a peer (database still
+  // running initdb) legitimately restarts a couple of times, and gating each
+  // service inline as it was created would fail the deploy for a stack that
+  // converges seconds later. Watching them together, after the stack is whole,
+  // separates "bouncing hard" from "waited, then settled".
+  // Gated on the opt-in readiness gate, PER SERVICE: a service's own
+  // `advanced.readiness` wins, else the project's. resolveReadinessGate is the one
+  // place that policy lives, so this and the single-app path can't drift. Default
+  // is OFF — the stack reports what docker reported, while each service's own
+  // Docker HEALTHCHECK (`advanced.healthcheck`) keeps running regardless, since
+  // the daemon owns that one and it never gates a deploy.
+  const watched = stabilityTargets.filter(
+    (t) => t.serviceId && readinessByServiceId.get(t.serviceId)?.stabilization.enabled,
+  );
+  const stabilityWarnings: string[] = [];
+  if (watched.length > 0) {
+    // One wall-clock window covers every container (verifyDeployedContainers
+    // watches them concurrently), so take the longest any watched service asked
+    // for rather than running the audit once per distinct window.
+    const windowMs = Math.max(
+      ...watched.map((t) => readinessByServiceId.get(t.serviceId!)!.stabilization.windowMs),
+    );
+    const findings = await verifyDeployedContainers(runtime, watched, logger, { windowMs });
+    for (const finding of findings) {
+      if (finding.verdict.ok && finding.verdict.warning) {
+        stabilityWarnings.push(`${finding.target.serviceName}: ${finding.verdict.warning}`);
+      }
+    }
+
+    // Failure action is per service too: one service may veto the deploy while
+    // another only warns.
+    const vetoing = findings.filter(
+      (f) =>
+        !f.verdict.ok &&
+        f.target.serviceId &&
+        readinessByServiceId.get(f.target.serviceId)?.onFailure === "fail",
+    );
+    for (const finding of findings.filter(
+      (f) => !f.verdict.ok && !vetoing.includes(f),
+    )) {
+      // "warn": say what didn't hold, but leave the service's deploy result alone
+      // so the stack stays up. Opting into the watch to get the signal must not
+      // also opt into a veto.
+      stabilityWarnings.push(`${finding.target.serviceName}: ${finding.verdict.reason}`);
+    }
+
+    if (vetoing.length > 0) {
+      // Rows + SSE are the audit's business; this loop only reconciles the
+      // in-memory result set the summary below is computed from.
+      const demoted = await recordUnstableServices({
+        deploymentId: dep.id,
+        findings: vetoing,
+        logger,
+      });
+      for (const result of results) {
+        const finding = result.serviceId ? demoted.get(result.serviceId) : undefined;
+        if (!finding || result.status === "failed") continue;
+        result.status = "failed";
+        // `detail` (headline + log tail), not the headline alone: when every
+        // service crash-loops this becomes the DEPLOYMENT's errorMessage, and the
+        // whole point is that it answers "why" without an SSH session.
+        result.error = finding.detail;
+        successful = Math.max(0, successful - 1);
+        unavailableServiceNames.add(finding.target.serviceName);
+      }
+    }
+  }
 
   // ── App prepare steps (in-container lifecycle hooks) ────────────────────────
   // Run template-declared prepare commands INSIDE the target service's container
@@ -1316,6 +1667,10 @@ export async function deployComposeServices(
         const service = services.find((s) => s.name === step.service);
         const result = service ? results.find((r) => r.serviceId === service.id) : undefined;
         if (!service || !result?.containerId) continue;
+        // Don't exec into a container the stabilization watch just failed: a
+        // `mustSucceed` step would report ITS timeout as the deploy's cause and
+        // bury the crash loop that actually explains everything.
+        if (result.status === "failed") continue;
 
         // `once`: skip when the value was already captured on a prior deploy.
         if (step.once && step.persistAs) {
@@ -1435,12 +1790,15 @@ export async function deployComposeServices(
   // Vercel-style single-domain composition: when the monorepo is exactly one
   // static frontend + one server backend, serve both on ONE domain (frontend at
   // `/`, backend reverse-proxied at `/api/` or the vercel.json rewrite prefix).
-  // Best-effort + additive: it only fires when every piece resolves (frontend
-  // IP+port+domain, backend IP+port) on a self-hosted runtime, and any failure
-  // just leaves the per-service routes already registered in the loop. NOTE:
-  // the static frontend must be exposed with a routable port for this to form
-  // (otherwise buildServiceRouteDomain/port resolution yields nothing and we
-  // no-op) — verify end-to-end on a live self-hosted deploy.
+  // Best-effort + additive: it only fires when every piece resolves on a
+  // self-hosted runtime, and any failure just leaves the per-service routes already
+  // registered in the loop.
+  //
+  // The frontend resolves as a DOC ROOT (its extracted host directory), so it needs
+  // no port and no container — the vhost is `root` at `/` plus the backend proxied
+  // at the prefix. It previously required the static frontend to be exposed on a
+  // routable port, which meant containerizing an nginx image purely to satisfy the
+  // "every target is a URL" assumption.
   if (routeContext?.routing && runtime.name !== "cloud") {
     try {
       // Reusable routing core (shared with the routing API): resolve each
@@ -1461,6 +1819,10 @@ export async function deployComposeServices(
         services: enabled,
         routingConfig: project.routingConfig,
         resolveTargetUrl,
+        // A static frontend has no upstream — the composite serves it from disk and
+        // still proxies the backend at the prefix, in the same vhost.
+        resolveStaticRoot: (serviceId) =>
+          results.find((r) => r.serviceId === serviceId)?.staticRoot ?? null,
         resolveDomain: (serviceId) => {
           const svc = enabled.find((s) => s.id === serviceId);
           // Composite (vercel-style single-domain) uses the service's PRIMARY route.
@@ -1482,6 +1844,10 @@ export async function deployComposeServices(
         await routeContext.routing.registerRoute({
           domain: r.hostname,
           tls: true,
+          terminatesTlsLocally: hostTerminatesTlsLocally(
+            r.hostname,
+            routeContext.domainByHostname.get(r.hostname.toLowerCase()),
+          ),
           targetUrl: r.targetUrl!,
           ...(r.proxyLocations?.length ? { proxyLocations: r.proxyLocations } : {}),
           ...(r.redirects?.length ? { redirects: r.redirects } : {}),
@@ -1502,6 +1868,10 @@ export async function deployComposeServices(
         await routeContext.routing.registerRoute({
           domain: reg.hostname,
           tls: true,
+          terminatesTlsLocally: hostTerminatesTlsLocally(
+            reg.hostname,
+            routeContext.domainByHostname.get(reg.hostname.toLowerCase()),
+          ),
           targetUrl: reg.targetUrl!,
           ...(reg.proxyLocations?.length ? { proxyLocations: reg.proxyLocations } : {}),
         });
@@ -1576,7 +1946,11 @@ export async function deployComposeServices(
   const warning =
     failed.length > 0
       ? `${failed.length}/${ordered.length} services failed: ${failedNames.join(", ")}`
-      : undefined;
+      : // Nothing failed, but something bounced on its way up — worth saying,
+        // since a service that restarted twice at boot often restarts in prod.
+        stabilityWarnings.length > 0
+        ? stabilityWarnings.join("; ")
+        : undefined;
   const firstFailure = failed.find((service) => service.error?.trim())?.error;
 
   // Any unverified service → the deploy's outcome is UNKNOWN. Resolve to

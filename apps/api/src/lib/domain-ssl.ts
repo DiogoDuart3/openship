@@ -16,8 +16,28 @@ import { resolveDeploymentPlatform, type DeploymentMeta } from "./deployment-run
  * budget. In-process mutex (single-process self-hosted) layered over a Postgres
  * advisory lock (multi-instance SaaS); see provision-lock.ts.
  */
-function sslIssueLockKey(hostname: string): string {
+export function sslIssueLockKey(hostname: string): string {
   return `ssl:issue:${hostname.trim().toLowerCase()}`;
+}
+
+/**
+ * The per-BOX ACME lock. `sslIssueLockKey` serializes one hostname against
+ * itself; this serializes every hostname on a box against every other, because
+ * certbot's standalone authenticator binds a single loopback port
+ * (`ACME_HTTP01_PORT`) that the edge proxies the challenge to. Two hostnames
+ * issuing at once therefore fight over that port and one dies with
+ * "Could not bind TCP port" — a failure that reads like a DNS problem and isn't.
+ *
+ * Unreachable with one custom domain per project, which is why it went unnoticed;
+ * "Include www" makes two the normal case, so a manual Verify on the apex can now
+ * collide with the pending-SSL sweep issuing for the www sibling. Taken INSIDE
+ * the per-hostname lock, so lock ordering is always hostname → box.
+ *
+ * `scope` is the serving server's id, or "local" for the box the API runs on —
+ * different servers keep issuing in parallel.
+ */
+export function acmeIssueLockKey(scope: string): string {
+  return `ssl:acme:${scope}`;
 }
 
 /**
@@ -35,16 +55,75 @@ function certComfortablyValid(result: SslResult): boolean {
 
 export type DomainSslAction = "provision" | "renew" | "verify";
 
+/** Why a domain's TLS is not certbot's job on the serving box. */
+export type TlsIssuedElsewhere = "external_ingress" | "manual_cert" | "managed_edge";
+
+/**
+ * Is TLS for this domain issued/terminated somewhere OTHER than certbot on the box
+ * that serves it? Returns the reason, or null when we really do issue it here.
+ *
+ * THE one place this question is answered. It used to be answered five times, in
+ * five vocabularies, by whoever happened to be calling: `skipSsl` in the routing
+ * planner, `external` in the route planner and in `verifyDomain`, a `skipCert`
+ * boolean threaded through the self-app edge provisioner, and an inline
+ * `domainType !== "free"` in the boot reconcile. Each new cert caller had to
+ * rediscover it, and the one that forgot burned a Let's Encrypt attempt on a
+ * hostname whose A record points at someone else's edge.
+ *
+ *   externalIngress → TLS terminates at the operator's own proxy/CDN; ACME can't
+ *                     run here (origin :80 may be firewalled to CDN IPs).
+ *   manualSsl       → operator-uploaded cert (BYO / Cloudflare Origin CA). certbot
+ *                     never issued it, so `renew` would error and flip it to
+ *                     "error".
+ *   free            → a managed `*.opsh.io` host: Openship Cloud's edge terminates
+ *                     TLS and forwards to plain :80 here. The box usually has no
+ *                     public A record for the name at all, so HTTP-01 cannot pass.
+ */
+export function tlsIssuedElsewhere(domain: {
+  domainType?: string | null;
+  externalIngress?: boolean | null;
+  manualSsl?: boolean | null;
+}): TlsIssuedElsewhere | null {
+  if (domain.externalIngress) return "external_ingress";
+  if (domain.manualSsl) return "manual_cert";
+  if (domain.domainType === "free") return "managed_edge";
+  return null;
+}
+
+/** Operator-facing one-liner for {@link tlsIssuedElsewhere}. */
+export function describeTlsIssuedElsewhere(
+  where: TlsIssuedElsewhere,
+  hostname: string,
+): string {
+  switch (where) {
+    case "external_ingress":
+      return `TLS for ${hostname} terminates at your own ingress — no certificate is issued here.`;
+    case "manual_cert":
+      return `${hostname} serves an uploaded certificate — certbot is not run for it.`;
+    default:
+      return `TLS for ${hostname} is handled by Openship Cloud — no local certificate needed.`;
+  }
+}
+
 interface DomainSslOptions {
   action: DomainSslAction;
   /** Restrict to a specific project (defense-in-depth; route layer
    *  already verified access). */
   projectId?: string;
-  includeWww?: boolean;
   /** Skip the "must be verified first" guard. Only the ACME-as-verification
    *  path (self-hosted verifyDomain) sets this — there, issuing the cert IS the
    *  verification, so it necessarily runs before `verified` is set. */
   allowUnverified?: boolean;
+}
+
+/** The lock scope for the box the API itself runs on. */
+export const LOCAL_ACME_SCOPE = "local";
+
+/** An SSL provider plus the ACME lock scope of the box it drives. */
+interface ResolvedSslProvider {
+  ssl: SslProvider;
+  /** {@link acmeIssueLockKey} scope — the serving server's id, or "local". */
+  lockScope: string;
 }
 
 async function resolveAuthorizedDomain(hostname: string, opts: DomainSslOptions) {
@@ -77,12 +156,16 @@ async function resolveAuthorizedDomain(hostname: string, opts: DomainSslOptions)
  *   - verified cert read     → "active" (+ expiry, issuer)
  *   - transient read failure → null (a redeploy that briefly can't read the cert
  *                              must NOT downgrade a live "active" to "provisioning")
+ *   - no cert BY DESIGN      → null (TLS is issued elsewhere; "provisioning" would
+ *                              overwrite a correct "external" and make the UI show
+ *                              a cert lifecycle nobody is driving)
  *   - cert genuinely missing → "provisioning" (still being issued)
  */
 export function resolveSslPatch(
   currentStatus: string | null | undefined,
   result: SslResult,
 ): { sslStatus: string; sslIssuer?: string; sslExpiresAt?: Date } | null {
+  if (result.reason === "not_local") return null;
   if (result.verified && result.expiresAt) {
     return {
       sslStatus: "active",
@@ -94,6 +177,17 @@ export function resolveSslPatch(
     return null;
   }
   return { sslStatus: "provisioning", sslIssuer: result.issuer };
+}
+
+/**
+ * The result for "we didn't issue anything, and that's correct".
+ *
+ * `verified: true` because from the caller's point of view TLS for this hostname is
+ * handled — the wizard should show success, not a failure it can't act on. No
+ * `expiresAt`, because we don't own that cert's lifecycle and must not claim to.
+ */
+function notLocalResult(hostname: string): SslResult {
+  return { domain: hostname, expiresAt: "", issuer: "", verified: true, reason: "not_local" };
 }
 
 async function persistSslResult(
@@ -119,7 +213,7 @@ async function persistSslResult(
  * Falls back to the global platform when the project has no active deployment
  * yet (single-box installs resolve to the same local provider either way).
  */
-async function resolveSslProvider(project: Project): Promise<SslProvider> {
+async function resolveSslProvider(project: Project): Promise<ResolvedSslProvider> {
   const depId = project.activeDeploymentId;
   if (depId) {
     const dep = await repos.deployment.findById(depId);
@@ -127,7 +221,7 @@ async function resolveSslProvider(project: Project): Promise<SslProvider> {
       const meta = (dep.meta ?? {}) as DeploymentMeta;
       try {
         const resolved = await resolveDeploymentPlatform(meta, { organizationId: dep.organizationId });
-        return resolved.platform.ssl;
+        return { ssl: resolved.platform.ssl, lockScope: meta.serverId ?? LOCAL_ACME_SCOPE };
       } catch {
         // Deploy target unresolvable — fall through to the host-anchored fallback.
       }
@@ -153,13 +247,13 @@ async function resolveSslProvider(project: Project): Promise<SslProvider> {
           { serverId: local.id } as DeploymentMeta,
           { organizationId: project.organizationId },
         );
-        return resolved.platform.ssl;
+        return { ssl: resolved.platform.ssl, lockScope: local.id };
       } catch {
         // Host-server unresolvable — last resort below.
       }
     }
   }
-  return platform().ssl;
+  return { ssl: platform().ssl, lockScope: LOCAL_ACME_SCOPE };
 }
 
 async function executeSslAction(
@@ -179,42 +273,54 @@ async function executeSslAction(
 
 // NOTE on the toolchain (certbot/OpenResty): we deliberately do NOT install it
 // here. Installing certbot can take 30–90s, which blows the renew HTTP request's
-// timeout. Toolchain install lives in the DEPLOY step chain instead — the deploy
-// preflight runs `system.ensureFeature("ssl", …)` whenever a planned domain has
-// `provisionSsl` (see build-pipeline.ts), streaming the install logs into the
-// deploy output. So a custom domain gets certbot installed AND its cert issued
-// as part of a normal deploy; this on-demand path only issues/renews against an
-// already-provisioned host (and surfaces a clear error if the toolchain is
-// missing — i.e. "redeploy to set up SSL").
+// timeout. Toolchain install lives in the DEPLOY step chain instead. The first
+// deploy prepares it for every local-certbot custom route, including a pending
+// one whose certificate issuance is deferred until verification. This
+// on-demand path can therefore issue/renew later without requiring a redeploy.
+//
+// EXACTLY ONE hostname per call. This used to take `includeWww` and issue the
+// sibling's certificate in the same call — unguarded, so a www failure threw
+// AFTER the apex had already succeeded and the caller reported the apex as
+// broken. `www.<apex>` is its own domain row with its own verification, DNS
+// record and certificate; callers that want both ask twice and report both.
 export async function manageDomainSsl(
   hostname: string,
   opts: DomainSslOptions,
 ): Promise<SslResult> {
   const { domainRecord, project } = await resolveAuthorizedDomain(hostname, opts);
-  const ssl = await resolveSslProvider(project);
+
+  // THE gate, and it lives here rather than in each caller: this is the single
+  // entrypoint that can open an ACME order (manual Provision/Verify, the ssl:renew
+  // scheduler, the self-app edge provisioner, the boot reconcile), and it used to
+  // run certbot for whatever hostname it was handed. Every caller was expected to
+  // know not to ask — so the gate belongs where the row is already loaded.
+  //
+  // `verify` is exempt: it's a read-only inspection of whatever cert is on disk,
+  // which is exactly what you want for an uploaded one.
+  const elsewhere = opts.action === "verify" ? null : tlsIssuedElsewhere(domainRecord);
+  if (elsewhere) {
+    // Deliberately NOT persisted: there is nothing new to record, and writing a
+    // status here would overwrite a correct `external` with `provisioning`.
+    return notLocalResult(domainRecord.hostname);
+  }
+
+  const { ssl, lockScope } = await resolveSslProvider(project);
   // `verify` is a read-only cert inspection (no ACME) → no lock. `provision`/
   // `renew` can open an ACME order, so serialize them per-hostname on the shared
   // issue lock — this is what stops the ssl:renew scheduler (which calls us with
-  // action:"renew") from racing a manual Verify on the same domain.
-  const runAction = (h: string, a: DomainSslAction): Promise<SslResult> =>
-    a === "verify"
-      ? executeSslAction(ssl, h, a)
-      : createProvisionLock(sslIssueLockKey(h)).run(() => executeSslAction(ssl, h, a));
+  // action:"renew") from racing a manual Verify on the same domain — and then on
+  // the per-box ACME lock, which stops it racing a DIFFERENT hostname for the
+  // shared standalone challenge port.
+  const result =
+    opts.action === "verify"
+      ? await executeSslAction(ssl, domainRecord.hostname, opts.action)
+      : await createProvisionLock(sslIssueLockKey(domainRecord.hostname)).run(() =>
+          createProvisionLock(acmeIssueLockKey(lockScope)).run(() =>
+            executeSslAction(ssl, domainRecord.hostname, opts.action),
+          ),
+        );
 
-  const result = await runAction(domainRecord.hostname, opts.action);
   await persistSslResult(domainRecord.id, domainRecord.sslStatus, result);
-
-  if (opts.includeWww) {
-    const wwwHostname = `www.${domainRecord.hostname}`;
-    const wwwRecord = await repos.domain.findByHostname(wwwHostname);
-
-    if (wwwRecord && wwwRecord.projectId === domainRecord.projectId && wwwRecord.verified) {
-      // Same project → same host → reuse the resolved provider.
-      const wwwResult = await runAction(wwwRecord.hostname, opts.action);
-      await persistSslResult(wwwRecord.id, wwwRecord.sslStatus, wwwResult);
-    }
-  }
-
   return result;
 }
 
@@ -238,7 +344,7 @@ export async function provisionDomainCertForVerify(
     projectId: opts.projectId,
     allowUnverified: true,
   });
-  const ssl = await resolveSslProvider(project);
+  const { ssl, lockScope } = await resolveSslProvider(project);
 
   // Serialize issuance per-hostname, and re-check the cert INSIDE the lock.
   // This closes the TOCTOU: two concurrent Verify hits (or Verify racing the
@@ -246,6 +352,10 @@ export async function provisionDomainCertForVerify(
   // — now inside the lock — sees the freshly-issued cert and reuses it instead
   // of opening a second ACME order. The service-level fast-path in verifyDomain
   // is only a cheap read-only optimization; THIS is the authoritative gate.
+  //
+  // The nested per-box lock covers the OTHER collision: a different hostname on
+  // the same box (the www sibling, the pending-SSL sweep) running certbot at the
+  // same time and losing the race for the shared standalone port.
   const result = await createProvisionLock(sslIssueLockKey(domainRecord.hostname)).run(async () => {
     if (!opts.force) {
       const existing = await ssl.verifyCert(domainRecord.hostname).catch(() => null);
@@ -262,7 +372,9 @@ export async function provisionDomainCertForVerify(
     // adapter runs certbot even when a stale cert file is present on disk —
     // otherwise its file-exists short-circuit would return the old cert and a
     // near-expiry renewal would silently no-op.
-    return ssl.provisionCert(domainRecord.hostname, { onLog: opts.onLog, force: true });
+    return createProvisionLock(acmeIssueLockKey(lockScope)).run(() =>
+      ssl.provisionCert(domainRecord.hostname, { onLog: opts.onLog, force: true }),
+    );
   });
 
   await persistSslResult(domainRecord.id, domainRecord.sslStatus, result);
@@ -285,7 +397,7 @@ export async function installDomainCert(
     projectId: opts.projectId,
     allowUnverified: opts.allowUnverified,
   });
-  const ssl = await resolveSslProvider(project);
+  const { ssl } = await resolveSslProvider(project);
   return ssl.installCert(domainRecord.hostname, cert);
 }
 
@@ -306,7 +418,7 @@ export async function verifyExistingCert(
     projectId: opts.projectId,
     allowUnverified: true,
   });
-  const ssl = await resolveSslProvider(project);
+  const { ssl } = await resolveSslProvider(project);
   const result = await ssl.verifyCert(domainRecord.hostname);
   await persistSslResult(domainRecord.id, domainRecord.sslStatus, result);
   return result;

@@ -123,12 +123,33 @@ const envSchema = z.object({
   OPENSHIP_MANAGED_EDGE: envBool("false"),
   /** Loopback dashboard port the managed edge proxies to (defaults 3001). */
   OPENSHIP_DASHBOARD_PORT: z.coerce.number().int().positive().catch(3001),
-  /** Let's Encrypt contact email for the managed edge (defaults to the admin). */
+  /** ACME account contact email (defaults to the admin during guided setup). */
   OPENSHIP_ACME_EMAIL: z.string().optional(),
   /** Skip the app-catalog's remote overlay fetch (see catalog-source.ts) - the
    *  bundled catalog becomes the sole source. For forks carrying their own
    *  catalog customizations, or air-gapped installs. */
   OPENSHIP_CATALOG_DISABLE_REMOTE: z.enum(["true", "false"]).optional(),
+  /** Alternate ACME directory URL. Unset keeps Certbot's Let's Encrypt default. */
+  OPENSHIP_ACME_DIRECTORY_URL: z.string().url().optional(),
+  /** External Account Binding credentials (must be configured as a pair). */
+  OPENSHIP_ACME_EAB_KID: z.string().optional(),
+  OPENSHIP_ACME_EAB_HMAC_KEY: z.string().optional(),
+  /** Certificate private-key algorithm and size. */
+  OPENSHIP_ACME_KEY_TYPE: z.enum(["ec256", "ec384", "rsa2048", "rsa4096"]).optional(),
+  /** CA root bundle path as seen by the Certbot process. */
+  OPENSHIP_ACME_CA_BUNDLE: z.string().optional(),
+  /** Non-interactive issuance requires explicit terms acceptance; historic default is true. */
+  OPENSHIP_ACME_TOS_AGREED: envBool("true"),
+  /**
+   * How long a deploy may HOLD waiting for a user decision (port conflict, edge
+   * 80/443 takeover) before it gives up and aborts. Milliseconds; default 5 min
+   * (see PROMPT_TIMEOUT_MS in lib/prompt-gateway).
+   *
+   * Exists for API-driven deploys: a human sees the modal instantly, but a client
+   * has to poll to notice the prompt at all, so the human-tuned window can expire
+   * before it ever looks. The deadline is published on the prompt as `expiresAt`.
+   */
+  OPENSHIP_PROMPT_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
 
   /* ---------- Mode ---------- */
   CLOUD_MODE: envBool("false"),
@@ -201,6 +222,20 @@ const envSchema = z.object({
   /* ---------- OAuth Providers ---------- */
   GITHUB_CLIENT_ID: z.string().optional(),
   GITHUB_CLIENT_SECRET: z.string().optional(),
+  /**
+   * Client id used for the GitHub DEVICE flow (browser code + verification URL),
+   * when the operator has not registered their own OAuth app.
+   *
+   * Separate from GITHUB_CLIENT_ID on purpose: that one is the operator's OAuth
+   * app and needs a SECRET to complete a redirect flow. The device flow has no
+   * secret at all — the user's approval in their browser IS the credential — so a
+   * client id can ship publicly and still be safe. Without this, a fresh
+   * self-hosted instance had no in-UI GitHub login at all: it fell through to
+   * "SSH into the box and run `gh auth login`".
+   *
+   * @see DEVICE_FLOW_CLIENT_ID for the shipped default.
+   */
+  GITHUB_DEVICE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
 
@@ -383,6 +418,42 @@ const envSchema = z.object({
     .min(16 * 1024)
     .max(8 * 1024 * 1024)
     .default(512 * 1024),
+}).superRefine((cfg, ctx) => {
+  // Fail ACME misconfiguration HERE, at boot, with the variable named — not at
+  // the first deploy, where NginxProvider's constructor re-checks the same rules
+  // (that check stays: the adapter also serves non-env callers). Empty/whitespace
+  // values count as unset, matching resolveAcmeProviderOptions.
+  const kid = cfg.OPENSHIP_ACME_EAB_KID?.trim();
+  const hmac = cfg.OPENSHIP_ACME_EAB_HMAC_KEY?.trim();
+  const bundle = cfg.OPENSHIP_ACME_CA_BUNDLE?.trim();
+  if (!!kid !== !!hmac) {
+    ctx.addIssue({
+      code: "custom",
+      path: [kid ? "OPENSHIP_ACME_EAB_HMAC_KEY" : "OPENSHIP_ACME_EAB_KID"],
+      message: "OPENSHIP_ACME_EAB_KID and OPENSHIP_ACME_EAB_HMAC_KEY must be set together",
+    });
+  }
+  if (kid && (!/^[\x20-\x7E]+$/.test(kid) || kid.length > 512)) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["OPENSHIP_ACME_EAB_KID"],
+      message: "must be printable ASCII (maximum 512 characters)",
+    });
+  }
+  if (hmac && !/^[A-Za-z0-9_-]+={0,2}$/.test(hmac)) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["OPENSHIP_ACME_EAB_HMAC_KEY"],
+      message: "must be the base64url-encoded value supplied by the CA",
+    });
+  }
+  if (bundle && !bundle.startsWith("/")) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["OPENSHIP_ACME_CA_BUNDLE"],
+      message: "must be an absolute path in the Certbot environment",
+    });
+  }
 });
 
 type Env = z.infer<typeof envSchema>;
@@ -455,6 +526,38 @@ if (env.DEPLOY_MODE === "desktop" && !env.OPENSHIP_AUTH_MODE && env.NODE_ENV !==
     `OPENSHIP_AUTH_MODE is required when DEPLOY_MODE="desktop". ` +
       `The launcher must declare the auth mode (the desktop app sets "none"); ` +
       `it is no longer inferred from the deploy mode.`,
+  );
+}
+
+// ─── "desktop" belongs to Electron alone ──────────────────────────────────
+//
+// DEPLOY_MODE=desktop is a POSTURE, not a convenience: it relaxes the zero-auth
+// gate (zero-auth-guard.ts), makes INTERNAL_TOKEN optional (internal-auth.ts),
+// silences the zero-auth banner, and reports `isServerHost: false` so the
+// dashboard stops treating the box as a deploy target.
+//
+// The CLI used to claim it on a bare VPS install purely to get an in-process job
+// runner. The result: a server-host install that identified as a laptop — no
+// "This Server" row (its startup hook is gated on modes:["selfhosted"]), a deploy
+// wizard offering only Openship Cloud, and a relaxed auth posture on a networked
+// box. The job runner never needed it (Redis reachability decides that).
+//
+// Electron declares BOTH DEPLOY_MODE=desktop and OPENSHIP_LOCAL_DASHBOARD_URL (it
+// serves the dashboard on a dynamic loopback port and must tell the API where).
+// Nothing else does. So a `desktop` claim without it is a launcher bug: warn
+// loudly rather than refuse, since a refusal here would brick the desktop app if
+// that pairing ever changes, and zeroAuthAllowed() still independently requires a
+// kernel-reported loopback peer.
+if (
+  env.DEPLOY_MODE === "desktop" &&
+  !env.OPENSHIP_LOCAL_DASHBOARD_URL &&
+  env.NODE_ENV !== "test"
+) {
+  console.warn(
+    `[env] DEPLOY_MODE="desktop" but OPENSHIP_LOCAL_DASHBOARD_URL is unset — ` +
+      `"desktop" is for the Electron app only. A server install should declare ` +
+      `DEPLOY_MODE="bare" (host processes) or "docker" (compose); claiming desktop ` +
+      `relaxes the zero-auth + internal-token gates and hides this box as a deploy target.`,
   );
 }
 
