@@ -6,18 +6,25 @@ services:
       - /home/ubuntu/openship/host-control-key:/run/openship/host-key:ro
       # The root docker-compose.yml api service (SaaS/from-source control plane)
       # deliberately ships with NO docker socket and NO edge volumes — see its
-      # header comment. THIS install runs api from that file but edge/dashboard
-      # from docker/docker-compose.yml (the self-hosted stack), so api still
-      # needs the docker socket (to build/run deployed app containers) and the
-      # same shared routing volumes edge reads from (so registerRoute's vhost
-      # writes are actually visible to edge). Without these, api silently loses
-      # deploy + routing capability on every recreate — discovered 2026-07-29
-      # after ~1.5h of api running with only the host-control-key mount.
+      # header comment. THIS install runs api AND dashboard from that file
+      # (both build from source), but edge from docker/docker-compose.yml (the
+      # self-hosted, pull-based stack) — so api still needs the docker socket
+      # (to build/run deployed app containers) and the same shared routing
+      # mounts edge reads from (so registerRoute's vhost writes are actually
+      # visible to edge). Without these, api silently loses deploy + routing
+      # capability on every recreate — discovered 2026-07-29 after ~1.5h of api
+      # running with only the host-control-key mount.
+      #
+      # Bind mounts (not named volumes) as of the merge/v0.5.0 cutover, matching
+      # upstream's docker/docker-compose.yml edge service — see
+      # UPGRADE-0.4.8-PLAN.md for why (api and edge MUST share the same
+      # storage, named-volume or bind-mount, or routes written by one are
+      # invisible to the other).
       - /var/run/docker.sock:/var/run/docker.sock
-      - openship_sites:/usr/local/openresty/nginx/conf/sites-enabled
-      - openship_certs:/etc/letsencrypt
-      - openship_acme:/var/www/acme
-      - openship_static:/opt/openship/static
+      - /var/lib/openship/edge/sites-enabled:/usr/local/openresty/nginx/conf/sites-enabled
+      - /etc/letsencrypt:/etc/letsencrypt
+      - /var/lib/openship/edge/acme:/var/www/acme
+      - /opt/openship/static:/opt/openship/static
     environment:
       OPENSHIP_HOST_SSH_HOST: host.docker.internal
       OPENSHIP_HOST_SSH_PORT: "22"
@@ -57,9 +64,3 @@ services:
       # crash-loops on a plain port-only install. Real public IP, confirmed via
       # `curl -4 ifconfig.me` on the host earlier this session.
       SERVER_IP: "152.228.238.183"
-
-volumes:
-  openship_sites:
-  openship_certs:
-  openship_acme:
-  openship_static:
