@@ -234,6 +234,14 @@ export type ComposeAdvanced = {
    * UNLIMITED_RESOURCES in ./resources).
    */
   resources?: { cpuCores?: number; memoryMb?: number };
+  /**
+   * Run an init process (tini) as PID 1 inside the container (Docker's
+   * `--init` / compose `init: true`). Without it, a foreground process that
+   * forks children and never calls wait() on them (e.g. `php artisan
+   * schedule:work` backgrounding scheduled commands) leaks zombies forever —
+   * PID 1 has no default reaper, so they only clear on container restart.
+   */
+  init?: boolean;
 };
 
 /**

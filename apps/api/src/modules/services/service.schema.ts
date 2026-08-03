@@ -111,6 +111,10 @@ const AdvancedSchema = Type.Object(
         Type.Null(),
       ]),
     ),
+    /** Docker `--init` (compose `init: true`) — runs tini as PID 1 so a
+     *  foreground process that forks background children (e.g. `schedule:work`)
+     *  gets them reaped instead of accumulating as zombies. */
+    init: Type.Optional(Type.Union([Type.Boolean(), Type.Null()])),
   },
   { additionalProperties: false },
 );

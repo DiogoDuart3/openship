@@ -3239,6 +3239,7 @@ export class DockerRuntime implements RuntimeAdapter {
         PortBindings: portBindings,
         Binds: binds,
         NetworkMode: group.id,
+        ...(config.advanced?.init === true && { Init: true }),
       },
       NetworkingConfig: {
         EndpointsConfig: {
