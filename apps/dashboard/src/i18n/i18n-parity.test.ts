@@ -40,11 +40,8 @@ const MISSING_BASELINE: Record<string, number> = {
   // else, and that built files stay on disk. A mistranslation is somebody taking a
   // live site offline, or leaving a forgotten one serving. English falls through via
   // deepMerge, so the card is correct in every locale, just not localised.
-  // NOTE(merge/v0.5.0): placeholder pending an actual `bun run i18n:check --full`
-  // pass against the merged locale files — recomputed in the compile gate.
   settings: 1136,
-  emailsAdmin: 628,
-  projects: 108,
+  emailsAdmin: 900,
   // +360: permissions.sourceAccess — 45 keys for the source access modal and its
   // repository path tree,
   // still English in the other 8 locales (they fall back via deepMerge, so the UI
@@ -55,7 +52,7 @@ const MISSING_BASELINE: Record<string, number> = {
   widgets: 498,
   // +40: mcpAuthorize gained 5 English-first keys — two digest lines that answer
   // "can it read my source?" either way, and three level tooltips.
-  misc: 163,
+  misc: 145,
   overview: 120,
   servers: 113,
   importProject: 81,
