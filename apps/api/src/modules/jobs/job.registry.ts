@@ -87,13 +87,19 @@ export const SYSTEM_JOB_DEFS: SystemJobDef[] = [
   {
     key: "retention-prune-daily",
     label: "Backup retention prune",
-    defaultCron: "17 3 * * *",
+    // Was "17 3 * * *" - collided with ssl:renew and audit:retention-prune,
+    // all three firing in the same second with no concurrency gate between
+    // recurring ticks (see RECURRING_TICK_CONCURRENCY in in-process.ts).
+    // Moved 10 minutes earlier; ssl:renew keeps the original :17 slot.
+    defaultCron: "07 3 * * *",
     run: async () => runRetentionSweep(),
   },
   {
     key: "audit:retention-prune",
     label: "Audit log prune",
-    defaultCron: "17 3 * * *",
+    // Was "17 3 * * *" - same collision as retention-prune-daily above.
+    // Moved 10 minutes later; ssl:renew keeps the original :17 slot.
+    defaultCron: "27 3 * * *",
     run: async () => pruneAuditEvents(),
   },
   {

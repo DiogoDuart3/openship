@@ -28,6 +28,14 @@ import type { JobRunner } from "./types";
 
 const POLL_INTERVAL_MS = 30_000;
 const DEFAULT_CONCURRENCY = 2;
+/** Caps how many recurring-schedule ticks (armNextTick's onTick) run at
+ *  once. Separate from DEFAULT_CONCURRENCY/inFlight above — those gate
+ *  backup-run processing (drainQueue), a different queue with different
+ *  semantics. Each recurring job is its own independent setTimeout chain;
+ *  without this, two cron expressions that happen to resolve to the same
+ *  instant (e.g. a scheduling collision) fire truly in parallel with no
+ *  limit at all. */
+const RECURRING_TICK_CONCURRENCY = 2;
 
 interface RecurringSchedule {
   jobId: string;
@@ -45,6 +53,8 @@ export class InProcessJobRunner implements JobRunner {
   private readonly inFlight = new Set<string>();
   private readonly enqueueQueue: string[] = [];
   private readonly maxConcurrency = DEFAULT_CONCURRENCY;
+  /** Gate for armNextTick's onTick calls — see RECURRING_TICK_CONCURRENCY. */
+  private readonly recurringInFlight = new Set<string>();
   private shuttingDown = false;
   private started = false;
 
@@ -150,6 +160,15 @@ export class InProcessJobRunner implements JobRunner {
       // Re-check we're still registered + not shutting down — caller
       // may have removed us during the wait.
       if (this.shuttingDown || !this.recurring.has(entry.jobId)) return;
+
+      // Wait for a free slot — two (or more) cron expressions resolving to
+      // the same instant must not run their onTick concurrently.
+      while (this.recurringInFlight.size >= RECURRING_TICK_CONCURRENCY) {
+        await new Promise((r) => setTimeout(r, 100));
+        if (this.shuttingDown || !this.recurring.has(entry.jobId)) return;
+      }
+
+      this.recurringInFlight.add(entry.jobId);
       try {
         await entry.onTick();
       } catch (err) {
@@ -157,6 +176,8 @@ export class InProcessJobRunner implements JobRunner {
           `[job-runner:in-process] recurring ${entry.jobId} failed:`,
           safeErrorMessage(err),
         );
+      } finally {
+        this.recurringInFlight.delete(entry.jobId);
       }
       // Arm the next tick.
       this.armNextTick(entry);
