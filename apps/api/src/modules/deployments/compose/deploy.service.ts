@@ -794,9 +794,26 @@ export async function deployComposeServices(
       // Verify liveness; if it's not up, fall through and redeploy it (from
       // its previous image via the fallback below). When the runtime can't
       // report container status, trust the row (best-effort, prior behavior).
-      const live = runtime.supports("containerInfo")
-        ? await runtime.getContainerInfo(carried.containerId).catch(() => null)
-        : undefined;
+      //
+      // A CONNECTION-LOSS error from the check must NOT be treated the same as
+      // a confirmed-missing container: a transient SSH/daemon hiccup mid-check
+      // used to collapse into the same `null` as "container is gone", which
+      // sent a perfectly healthy STATEFUL service (e.g. the database) down the
+      // destroy-and-recreate path on nothing more than a dropped connection —
+      // and if the recreate's own connection then also failed, the container
+      // ended up destroyed with nothing to replace it. Only a confirmed
+      // "missing" (or a non-connection error) counts as gone; anything else
+      // trusts the row, matching reconcile's "never destroy on uncertainty".
+      let live: Awaited<ReturnType<typeof runtime.getContainerInfo>> | null | undefined;
+      if (runtime.supports("containerInfo")) {
+        try {
+          live = await runtime.getContainerInfo(carried.containerId);
+        } catch (err) {
+          live = isConnectionLoss(err) ? undefined : null;
+        }
+      } else {
+        live = undefined;
+      }
       const alive = live === undefined || live?.status === "running";
       if (alive) {
         // A network reconnect may have re-assigned the container's IP, so
