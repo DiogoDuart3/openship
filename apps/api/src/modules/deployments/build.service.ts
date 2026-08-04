@@ -14,7 +14,7 @@
  * pipeline owns the deploy↔rollback cycle (a deliberate dynamic import).
  */
 
-import { repos, type Project } from "@repo/db";
+import { repos, type Project, type Deployment } from "@repo/db";
 import {
   AppError,
   NotFoundError,
@@ -43,6 +43,9 @@ import { getLatestCommit, getRepository } from "../github/github.service";
 import { assertGitHubRepoAccess } from "../github/github-access";
 import { firePreDeployBackups } from "../backups/triggers/pre-deploy";
 import { resolveSmartRoute } from "./smart-route";
+import { requestCoalescedRedeploy, takeCoalescedRedeploy } from "./deploy-coalesce";
+import { webhookActorCtx } from "../github/webhook-shared";
+import { resolveOrgOwner } from "../../lib/org-actor";
 import { snapshotNeedsGitSource, withoutPinnedArtifacts } from "./pinned-artifacts";
 import { resolveProjectInfo } from "./prepare.service";
 import { getFolderSession } from "../projects/folder/session-store";
@@ -635,18 +638,121 @@ export async function loadDeployment(deploymentId: string) {
   return { dep, project };
 }
 
-/** Throw if the project already has an in-progress deployment. */
-export async function checkNoActiveBuild(projectId: string) {
+/**
+ * Statuses that unconditionally hold a project's one-active-deployment slot.
+ * MATCHES the `uq_deployment_one_active_per_project` partial unique index
+ * (drizzle schema `deployment.ts`) — deliberately does NOT include
+ * `reconciling` there, because a `reconciling` deployment on a "bare"
+ * (non-inspectable) runtime never resolves on its own, and the index
+ * excludes it specifically so a fresh deploy can still land and supersede
+ * it (see the comment in reconcile.service.ts). Blocking on it here too
+ * would strand a bare-runtime project with no way to ever redeploy.
+ */
+const ACTIVE_DEPLOYMENT_STATUSES = ["queued", "building", "deploying"];
+
+/**
+ * A `reconciling` deployment additionally holds the slot here (app-level
+ * only, NOT in the DB index — see `ACTIVE_DEPLOYMENT_STATUSES`) when its
+ * runtime is actually capable of resolving on its own: a connection drop to
+ * a docker/server-backed deploy has an UNKNOWN outcome (its containers may
+ * still be mid create/destroy swap), so a second deploy must not start
+ * touching the same project's containers while the first's fate is
+ * unresolved — this is precisely the gap that let two forceAll deploys race
+ * the same project's containers and destroy one with nothing to replace it.
+ * `runtimeMode === "bare"` is excluded (matches the index) since THAT
+ * `reconciling` state is permanent, not transient.
+ */
+function reconcilingBlocksNewDeploy(dep: Deployment): boolean {
+  if (dep.status !== "reconciling") return false;
+  const meta = dep.meta as { runtimeMode?: string } | null;
+  return meta?.runtimeMode !== "bare";
+}
+
+/**
+ * Check whether the project already has an in-progress deployment.
+ *
+ * Without `coalesce`, throws (today's behavior) — used by callers with
+ * precise, non-mergeable intent (rollback, folder-upload build access).
+ *
+ * With `coalesce`, a busy slot does NOT throw: the request is recorded via
+ * `requestCoalescedRedeploy` (merged with any other pending request for this
+ * project) and this returns the currently-active deployment instead, so the
+ * caller can report "already in progress, queued" rather than fail. See
+ * `fireCoalescedRedeployIfAny` for where the merged request actually runs.
+ *
+ * This check is a best-effort, non-atomic pre-check (a request can still
+ * slip past it and lose the atomic insert below) — it is NOT the safety
+ * boundary for `reconciling` deploys. That safety boundary is the
+ * carry-forward liveness check in `compose/deploy.service.ts`, which now
+ * trusts an unverifiable (connection-loss) container rather than assuming
+ * it's gone — so even a residual race here can no longer destroy a healthy
+ * carried-forward service.
+ */
+export async function checkNoActiveBuild(
+  projectId: string,
+  coalesce?: { forceAll?: boolean; serviceIds?: string[]; trigger?: string },
+): Promise<Deployment | undefined> {
   const { rows } = await repos.deployment.listByProject(projectId, {
     page: 1,
     perPage: SYSTEM.DEPLOYMENTS.MAX_CONCURRENT_PER_PROJECT + 1,
   });
-  const active = rows.find((d) => ["queued", "building", "deploying"].includes(d.status));
-  if (active) {
-    throw new ForbiddenError(
-      `A deployment is already in progress (${active.id}). Cancel it first or wait for it to complete.`,
-    );
+  const active = rows.find(
+    (d) => ACTIVE_DEPLOYMENT_STATUSES.includes(d.status) || reconcilingBlocksNewDeploy(d),
+  );
+  if (!active) return undefined;
+  if (coalesce) {
+    requestCoalescedRedeploy(projectId, coalesce);
+    return active;
   }
+  throw new ForbiddenError(
+    `A deployment is already in progress (${active.id}). Cancel it first or wait for it to complete.`,
+  );
+}
+
+/**
+ * Fire a pending coalesced redeploy for `project`, if one was recorded while
+ * its previous deployment held the slot. Call this once a deployment reaches
+ * a TERMINAL status (ready / failed / cancelled / partial_failure /
+ * action_required / rejected) — never while still queued/building/deploying/
+ * reconciling, or the fresh deploy would collide with the one that's still
+ * running. Fire-and-forget: errors are logged, never thrown, so a coalesced
+ * redeploy's failure can't take down the caller that just finished.
+ */
+export function fireCoalescedRedeployIfAny(project: Project): void {
+  const entry = takeCoalescedRedeploy(project.id);
+  if (!entry) return;
+  void (async () => {
+    try {
+      // No human session triggered this — attribute it to the org owner
+      // (same convention as a webhook deploy), falling back to any member
+      // so a coalesced redeploy isn't silently dropped for an org whose
+      // owner role isn't set (rare org-creation race).
+      const owner = await resolveOrgOwner(project.organizationId, "first-member");
+      if (!owner) {
+        console.error(
+          `[Deploy] project ${project.id}: coalesced redeploy dropped — organization has no member to attribute it to.`,
+        );
+        return;
+      }
+      console.log(
+        `[Deploy] project ${project.id}: firing coalesced redeploy (forceAll=${entry.forceAll}, trigger=${entry.trigger}).`,
+      );
+      await triggerDeployment(
+        webhookActorCtx(owner.userId, project.organizationId, "deploy:coalesced-redeploy"),
+        {
+          projectId: project.id,
+          forceAll: entry.forceAll,
+          serviceIds:
+            entry.serviceIds === "all" || entry.serviceIds === null
+              ? undefined
+              : [...entry.serviceIds],
+          trigger: "manual",
+        },
+      );
+    } catch (err) {
+      console.error(`[Deploy] project ${project.id}: coalesced redeploy failed to trigger:`, err);
+    }
+  })();
 }
 
 /**
@@ -1605,7 +1711,28 @@ export async function triggerDeployment(
     }
   }
 
-  await checkNoActiveBuild(project.id);
+  // An atomic rollback replay (or an explicit rollback trigger) carries
+  // precise, non-mergeable intent — "restore exactly this artifact" must
+  // never be silently coalesced into "redeploy whatever's current", so it
+  // keeps the hard-block behavior (same exclusion reconcileComposeDrift uses
+  // below). Every other trigger (manual, webhook, forceAll, refresh) is
+  // "redeploy the project's current desired state" regardless of exactly
+  // when it's requested, so it's safe — and, per the incident this closes,
+  // necessary — to coalesce into one follow-up run instead of racing the
+  // in-flight deploy or bouncing the caller with a 403.
+  const isPreciseIntent = !!data.reuseSnapshot || data.trigger === "rollback";
+  const busy = await checkNoActiveBuild(
+    project.id,
+    isPreciseIntent
+      ? undefined
+      : { forceAll: data.forceAll, serviceIds: data.serviceIds, trigger: data.trigger },
+  );
+  if (busy) {
+    console.log(
+      `[Deploy] project ${project.id}: coalesced into pending redeploy — ${busy.id} is still active.`,
+    );
+    return { deployment: busy, skipped: true as const, coalesced: true as const };
+  }
 
   // Reconcile upstream compose drift before the pipeline reads service rows —
   // covers webhook (git push) + manual triggers. Skip atomic rollback: it must

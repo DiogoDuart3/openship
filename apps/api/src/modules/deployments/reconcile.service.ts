@@ -25,6 +25,7 @@ import { safeErrorMessage } from "@repo/core";
 import { resolveDeploymentRuntime } from "../../lib/deployment-runtime";
 import { createReachabilityProbe } from "../../lib/server-reachability";
 import { isConnectionLoss } from "../../lib/remote-state";
+import { fireCoalescedRedeployIfAny } from "./build.service";
 
 export type ReconcileOutcome =
   | "finalized" // resolved to ready / partial_failure / failed
@@ -109,6 +110,8 @@ export async function reconcileDeployment(deploymentId: string): Promise<Reconci
     await repos.deployment.updateStatus(dep.id, "failed", {
       errorMessage: "Reconcile found no containers to verify.",
     });
+    const project = await repos.project.findById(dep.projectId);
+    if (project) fireCoalescedRedeployIfAny(project);
     return "finalized";
   }
 
@@ -155,6 +158,8 @@ export async function reconcileDeployment(deploymentId: string): Promise<Reconci
   if (verdict === "failed") {
     // Forward-only: a failed reconcile NEVER advances the project pointer.
     await repos.deployment.updateStatus(dep.id, "failed", { meta: nextMeta });
+    const project = await repos.project.findById(dep.projectId);
+    if (project) fireCoalescedRedeployIfAny(project);
     return "finalized";
   }
 
@@ -173,6 +178,7 @@ export async function reconcileDeployment(deploymentId: string): Promise<Reconci
   if (project && !(await isSuperseded(project.activeDeploymentId, dep))) {
     await repos.project.setActiveDeployment(project.id, dep.id);
   }
+  if (project) fireCoalescedRedeployIfAny(project);
   return "finalized";
 }
 

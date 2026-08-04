@@ -24,6 +24,7 @@ import { audit } from "../../lib/audit";
 import * as sessionManager from "./session-manager";
 import type { BuildSessionState } from "./session-manager";
 import { failureStatusFor } from "./blocking-errors";
+import { fireCoalescedRedeployIfAny } from "./build.service";
 import { detectAndStoreFavicon } from "../../lib/favicon-detector";
 import {
   markWebmailInstalled,
@@ -265,6 +266,9 @@ export async function onFailure(
       },
     },
   );
+
+  // Terminal status reached — free slot, run any coalesced redeploy request.
+  fireCoalescedRedeployIfAny(project);
 }
 
 export async function onCancelled(
@@ -326,6 +330,9 @@ export async function onCancelled(
       durationMs,
     },
   });
+
+  // Terminal status reached — free slot, run any coalesced redeploy request.
+  fireCoalescedRedeployIfAny(ctx.project);
 }
 
 export async function onSuccess(
@@ -456,4 +463,10 @@ export async function onSuccess(
     const mailServerId = mailServerIdFromWebmailSlug(project.slug);
     if (mailServerId) void markWebmailInstalled(mailServerId, project.organizationId, result.url);
   }
+
+  // This deployment just reached a TERMINAL status, freeing the project's
+  // one-active-deployment slot — run any redeploy that coalesced while it
+  // was held. Must come after everything above: the slot is only actually
+  // free once the status write (updateStatus "ready") has committed.
+  fireCoalescedRedeployIfAny(project);
 }
